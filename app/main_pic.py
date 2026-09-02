@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -14,7 +15,7 @@ from .main import (
 )
 from .reverse_search import search as reverse_image_search
 
-app = FastAPI(title="AiWebCity", version="0.7.0-picimage")
+app = FastAPI(title="AiWebCity", version="0.8.0-picimage")
 
 
 @app.get("/")
@@ -29,8 +30,21 @@ async def health() -> dict[str, Any]:
         "token_configured": bool(TIMEWEB_TOKEN),
         "reverse_search": "PicImageSearch",
         "reverse_search_engines": ["Yandex Images", "Google Lens"],
+        "city_scope": "Новороссийск",
         "photo_persistence": False,
     }
+
+
+def _is_novorossiysk_geo(geo: dict[str, Any] | None) -> bool:
+    if not geo:
+        return True  # Do not block the service when geocoding is temporarily unavailable.
+    text = norm_text(geo.get("display_name")).lower().replace("ё", "е")
+    return "новороссийск" in text or "novorossiysk" in text
+
+
+def _address_is_novorossiysk(address: str) -> bool:
+    text = re.sub(r"\s+", " ", address.lower().replace("ё", "е")).strip()
+    return "новороссийск" in text or "novorossiysk" in text
 
 
 @app.post("/api/identify")
@@ -49,22 +63,37 @@ async def identify(photo: UploadFile = File(...), address: str = Form(...), year
     address = address.strip()
     if not address:
         raise HTTPException(400, "Укажите адрес здания.")
+    if not _address_is_novorossiysk(address):
+        raise HTTPException(400, "AiWebCity сейчас работает только по Новороссийску. Укажите адрес в Новороссийске.")
 
     # Privacy: the uploaded photo stays in memory and is never written to disk.
     analysis = await analyze_photo(raw, content_type, address, year.strip())
     geo = await geocode_address(address)
+    if not _is_novorossiysk_geo(geo):
+        raise HTTPException(400, "Указанный адрес не относится к Новороссийску. Проект сейчас ограничен Новороссийском.")
 
     raw_queries = analysis.get("search_queries") if isinstance(analysis.get("search_queries"), list) else []
     queries = [norm_text(q) for q in raw_queries if norm_text(q)]
     candidates = analysis.get("identity_candidates") if isinstance(analysis.get("identity_candidates"), list) else []
-    candidate_names = [norm_text(i.get("name")) for i in candidates if isinstance(i, dict) and norm_text(i.get("name"))]
+    candidate_names = [
+        norm_text(item.get("name"))
+        for item in candidates
+        if isinstance(item, dict) and norm_text(item.get("name"))
+    ]
     queries = list(dict.fromkeys([f"{name} Новороссийск" for name in candidate_names] + queries))[:6]
 
-    reverse_result = await reverse_image_search(raw)
+    reverse_result = await reverse_image_search(raw, address=address)
     reverse_items = reverse_result["results"]
-    similar = dedupe_results(reverse_items + await wikimedia_search(queries or [f"Новороссийск {address}"], limit=12), 30)
 
-    historical = []
+    # Wikimedia is also city-scoped. Search terms always include Novorossiysk and the address.
+    city_queries = list(dict.fromkeys([
+        f"Новороссийск {address}",
+        *[f"Новороссийск {q}" for q in queries],
+    ]))[:6]
+    open_images = await wikimedia_search(city_queries, limit=12)
+    similar = dedupe_results(reverse_items + open_images, 12)
+
+    historical: list[dict[str, Any]] = []
     if geo:
         requested_year = extract_year(year)
         historical.extend(await pastvu_search(geo["lat"], geo["lon"], requested_year or 1999))
@@ -79,6 +108,7 @@ async def identify(photo: UploadFile = File(...), address: str = Form(...), year
 
     return {
         "status": "completed",
+        "city": "Новороссийск",
         "address": address,
         "year": year.strip(),
         "geocode": geo,
@@ -88,8 +118,6 @@ async def identify(photo: UploadFile = File(...), address: str = Form(...), year
         "similar_images": similar,
         "historical_images": dedupe_results(historical, 24),
         "sources": [
-            {"name": "Yandex Images", "url": reverse_result["engines"][0].get("search_url") or "https://yandex.com/images/", "description": "Reverse image search через PicImageSearch."},
-            {"name": "Google Lens", "url": reverse_result["engines"][1].get("search_url") or "https://lens.google.com/", "description": "Дополнительный визуальный поиск через PicImageSearch."},
             {"name": "PastPhoto", "url": build_pastphoto_link(address), "description": "Исторические фотографии по месту."},
             {"name": "PastVu", "url": "https://pastvu.com/", "description": "Исторические фотографии рядом с координатами."},
             {"name": "Wikimedia Commons", "url": "https://commons.wikimedia.org/", "description": "Открытая база изображений."},
