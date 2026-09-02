@@ -31,15 +31,12 @@ TIMEWEB_TOKEN = os.getenv("TIMEWEB_AI_TOKEN", "").strip()
 VISION_MODEL = os.getenv("TIMEWEB_VISION_MODEL", "openai/gpt-4.1-mini")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "12"))
 
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "").strip()
-YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID", "").strip()
-YANDEX_IMAGE_URL = "https://searchapi.api.cloud.yandex.net/v2/image/search_by_image"
 PASTVU_API_URL = "https://api.pastvu.com/api2"
 WIKIMEDIA_API_URL = "https://commons.wikimedia.org/w/api.php"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 PASTPHOTO_BASE = "https://pastphoto.ru/place/"
 
-app = FastAPI(title="AiWebCity", version="0.4.0")
+app = FastAPI(title="AiWebCity", version="0.5.0")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.mount("/results", StaticFiles(directory=str(RESULTS_DIR)), name="results")
 
@@ -50,7 +47,8 @@ def require_token() -> None:
 
 
 def data_url(image_bytes: bytes, content_type: str) -> str:
-    return f"data:{content_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{content_type};base64,{encoded}"
 
 
 def extract_text(content: Any) -> str:
@@ -104,34 +102,34 @@ async def timeweb_chat(messages: list[dict[str, Any]], model: str, *, temperatur
 async def analyze_photo(image_bytes: bytes, content_type: str, address: str, year: str) -> dict[str, Any]:
     prompt = f"""
 Ты — модуль компьютерного зрения городского проекта AiWebCity для Новороссийска.
-Твоя задача на этом этапе — НЕ реконструировать историю, а помочь точно понять, что изображено на фотографии.
+Твоя задача на этом этапе — идентификация объекта и подготовка поиска. НЕ реконструируй историю.
 
-Адрес от пользователя: {address}
-Запрошенный период: {year or 'не указан'}
+Адрес пользователя: {address}
+Запрошенный исторический период: {year or 'не указан'}
 
 Правила:
-1. Описывай только то, что видно на фотографии, и отдельно то, что можно предположить по контексту адреса.
-2. Нельзя придумывать исторические факты, даты строительства, архитектора, старое название или происхождение здания.
-3. Сформируй несколько кандидатов на идентичность объекта только при наличии оснований.
-4. Поисковые запросы должны быть практичными: название объекта + Новороссийск, адрес, улица, ориентир.
-5. Отдельно укажи визуальные признаки, которые помогут сопоставить фотографию с другими снимками здания.
-6. Если точная идентификация невозможна, честно укажи это.
+1. Отделяй видимые факты от предположений.
+2. Не придумывай даты строительства, архитектора, исторические названия или события.
+3. Предлагай кандидатов только при наличии оснований.
+4. Создай практичные поисковые запросы: название объекта, адрес, улица, ориентиры, историческое название только если оно видно или явно дано пользователем.
+5. Опиши визуальный отпечаток фасада, полезный для сопоставления снимков.
+6. Если точная идентификация невозможна, так и напиши.
 
 Верни строго JSON:
-{
-  "what_is_visible": "краткое описание",
-  "object_type": "жилой дом / административное здание / вокзал / храм / промышленный объект / другое",
+{{
+  "what_is_visible": "краткое описание того, что видно",
+  "object_type": "тип объекта",
   "identity_candidates": [
-    {"name": "кандидат", "reason": "почему", "confidence": "high|medium|low"}
+    {{"name": "кандидат", "reason": "обоснование", "confidence": "high|medium|low"}}
   ],
-  "visual_fingerprint": ["форма фасада", "этажность", "характерные окна", "углы/выступы", "материалы", "вывески"],
-  "search_queries": ["до 6 запросов для поиска фотографий и страниц"],
+  "visual_fingerprint": ["этажность", "форма фасада", "окна", "углы/выступы", "материалы", "вывески", "другие уникальные признаки"],
+  "search_queries": ["до 6 конкретных запросов"],
   "historical_claims": [],
-  "limits": "что по этой фотографии установить нельзя"
-}
+  "limits": "что нельзя установить только по фото"
+}}
 """
     body = await timeweb_chat([
-        {"role": "system", "content": "Отвечай на русском. Это модуль идентификации, а не генерации истории."},
+        {"role": "system", "content": "Отвечай на русском. Никогда не превращай догадки в исторические факты."},
         {"role": "user", "content": [
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": data_url(image_bytes, content_type)}},
@@ -142,7 +140,7 @@ async def analyze_photo(image_bytes: bytes, content_type: str, address: str, yea
 
 
 async def geocode_address(address: str) -> dict[str, Any] | None:
-    headers = {"User-Agent": "AiWebCity/0.4 (+https://aiweb.su/)"}
+    headers = {"User-Agent": "AiWebCity/0.5 (+https://aiweb.su/)"}
     params = {"q": address, "format": "jsonv2", "limit": 1, "addressdetails": 1}
     try:
         async with httpx.AsyncClient(timeout=15, headers=headers) as client:
@@ -153,7 +151,11 @@ async def geocode_address(address: str) -> dict[str, Any] | None:
         if not rows:
             return None
         row = rows[0]
-        return {"lat": float(row["lat"]), "lon": float(row["lon"]), "display_name": row.get("display_name", "")}
+        return {
+            "lat": float(row["lat"]),
+            "lon": float(row["lon"]),
+            "display_name": row.get("display_name", ""),
+        }
     except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
@@ -167,44 +169,12 @@ def extract_year(text: str) -> int | None:
     return min(years) if years else None
 
 
-async def yandex_image_search(image_bytes: bytes) -> list[dict[str, Any]]:
-    if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
-        return []
-    headers = {"Api-Key": YANDEX_API_KEY, "Content-Type": "application/json"}
-    payload = {"folderId": YANDEX_FOLDER_ID, "data": base64.b64encode(image_bytes).decode("ascii"), "page": "0", "familyMode": "MODERATE"}
-    try:
-        async with httpx.AsyncClient(timeout=40) as client:
-            response = await client.post(YANDEX_IMAGE_URL, headers=headers, json=payload)
-        if response.status_code >= 400:
-            return []
-        body = response.json()
-        results: list[dict[str, Any]] = []
-        for item in body.get("images", [])[:12]:
-            if not isinstance(item, dict):
-                continue
-            image_url = norm_text(item.get("url"))
-            page_url = norm_text(item.get("pageUrl"))
-            if not image_url:
-                continue
-            title = norm_text(item.get("pageTitle")) or "Результат Яндекс Картинок"
-            passage = norm_text(item.get("passage"))
-            results.append({
-                "image_url": image_url,
-                "page_url": page_url,
-                "title": title,
-                "description": passage,
-                "source": "Яндекс Картинки",
-                "kind": "similar",
-                "year": extract_year(" ".join([title, passage, page_url])),
-            })
-        return results
-    except (httpx.HTTPError, ValueError, json.JSONDecodeError):
-        return []
-
-
 async def pastvu_search(lat: float, lon: float, year_to: int = 1999) -> list[dict[str, Any]]:
-    params_obj: dict[str, Any] = {"geo": [lat, lon], "distance": 1500, "year2": year_to, "limit": 30}
-    params = {"method": "photo.giveNearestPhotos", "params": json.dumps(params_obj, ensure_ascii=False, separators=(",", ":"))}
+    params_obj = {"geo": [lat, lon], "distance": 1500, "year2": year_to, "limit": 30}
+    params = {
+        "method": "photo.giveNearestPhotos",
+        "params": json.dumps(params_obj, ensure_ascii=False, separators=(",", ":")),
+    }
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(PASTVU_API_URL, params=params)
@@ -220,14 +190,13 @@ async def pastvu_search(lat: float, lon: float, year_to: int = 1999) -> list[dic
             if not file_id:
                 continue
             cid = item.get("cid")
-            page_url = f"https://pastvu.com/p/{cid}" if cid else "https://pastvu.com/"
             try:
                 year_value = int(item.get("year")) if item.get("year") is not None else None
             except (TypeError, ValueError):
                 year_value = None
             results.append({
                 "image_url": f"https://img.pastvu.com/d/{file_id}",
-                "page_url": page_url,
+                "page_url": f"https://pastvu.com/p/{cid}" if cid else "https://pastvu.com/",
                 "title": norm_text(item.get("title")) or "Историческая фотография",
                 "description": norm_text(item.get("desc") or item.get("description")),
                 "source": "PastVu",
@@ -242,13 +211,19 @@ async def pastvu_search(lat: float, lon: float, year_to: int = 1999) -> list[dic
 
 async def wikimedia_search(queries: list[str], limit: int = 12) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
-    async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "AiWebCity/0.4"}) as client:
+    async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "AiWebCity/0.5"}) as client:
         for query in queries[:4]:
             params = {
-                "action": "query", "generator": "search", "gsrnamespace": 6,
-                "gsrsearch": query, "gsrlimit": 8, "prop": "imageinfo",
-                "iiprop": "url|extmetadata", "iiurlwidth": 900,
-                "format": "json", "formatversion": 2,
+                "action": "query",
+                "generator": "search",
+                "gsrnamespace": 6,
+                "gsrsearch": query,
+                "gsrlimit": 8,
+                "prop": "imageinfo",
+                "iiprop": "url|extmetadata",
+                "iiurlwidth": 900,
+                "format": "json",
+                "formatversion": 2,
             }
             try:
                 response = await client.get(WIKIMEDIA_API_URL, params=params)
@@ -261,18 +236,18 @@ async def wikimedia_search(queries: list[str], limit: int = 12) -> list[dict[str
                         continue
                     info = infos[0]
                     image_url = norm_text(info.get("thumburl") or info.get("url"))
-                    page_url = norm_text(page.get("canonicalurl"))
                     if not image_url:
                         continue
+                    page_url = norm_text(page.get("canonicalurl"))
                     ext = info.get("extmetadata") or {}
                     title = norm_text(page.get("title"))
-                    description = norm_text((ext.get("ImageDescription") or {}).get("value"))
+                    description = re.sub(r"<[^>]+>", " ", norm_text((ext.get("ImageDescription") or {}).get("value")))
                     key = page_url or image_url
                     merged[key] = {
                         "image_url": image_url,
                         "page_url": page_url or "https://commons.wikimedia.org/",
                         "title": title or "Wikimedia Commons",
-                        "description": re.sub(r"<[^>]+>", " ", description),
+                        "description": description,
                         "source": "Wikimedia Commons",
                         "kind": "similar",
                         "year": extract_year(" ".join([title, description])),
@@ -310,7 +285,11 @@ def identity_summary(analysis: dict[str, Any]) -> dict[str, Any]:
         confidence = str(item.get("confidence", "low")).lower()
         if confidence not in {"high", "medium", "low"}:
             confidence = "low"
-        cleaned.append({"name": norm_text(item.get("name")), "reason": norm_text(item.get("reason")), "confidence": confidence})
+        cleaned.append({
+            "name": norm_text(item.get("name")),
+            "reason": norm_text(item.get("reason")),
+            "confidence": confidence,
+        })
     return {"candidates": cleaned}
 
 
@@ -321,7 +300,12 @@ async def index() -> FileResponse:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "token_configured": bool(TIMEWEB_TOKEN), "yandex_configured": bool(YANDEX_API_KEY and YANDEX_FOLDER_ID), "vision_model": VISION_MODEL}
+    return {
+        "ok": True,
+        "token_configured": bool(TIMEWEB_TOKEN),
+        "paid_image_search": False,
+        "vision_model": VISION_MODEL,
+    }
 
 
 @app.post("/api/identify")
@@ -349,29 +333,44 @@ async def identify(photo: UploadFile = File(...), address: str = Form(...), year
     analysis = await analyze_photo(raw, content_type, address, year.strip())
     geo = await geocode_address(address)
 
-    queries = analysis.get("search_queries") if isinstance(analysis.get("search_queries"), list) else []
-    queries = [norm_text(q) for q in queries if norm_text(q)]
+    raw_queries = analysis.get("search_queries") if isinstance(analysis.get("search_queries"), list) else []
+    queries = [norm_text(q) for q in raw_queries if norm_text(q)]
     candidates = analysis.get("identity_candidates") if isinstance(analysis.get("identity_candidates"), list) else []
-    candidate_names = [norm_text(item.get("name")) for item in candidates if isinstance(item, dict) and norm_text(item.get("name"))]
+    candidate_names = [
+        norm_text(item.get("name"))
+        for item in candidates
+        if isinstance(item, dict) and norm_text(item.get("name"))
+    ]
     queries = list(dict.fromkeys([f"{name} Новороссийск" for name in candidate_names] + queries))[:6]
 
-    similar = await yandex_image_search(raw)
-    similar.extend(await wikimedia_search(queries or [f"Новороссийск {address}"], limit=12))
+    similar = await wikimedia_search(queries or [f"Новороссийск {address}"], limit=12)
 
     historical: list[dict[str, Any]] = []
     if geo:
         requested_year = extract_year(year)
         historical.extend(await pastvu_search(geo["lat"], geo["lon"], requested_year or 1999))
 
-    yandex_historical = [item for item in similar if isinstance(item.get("year"), int) and item["year"] <= 2000]
-    historical.extend(yandex_historical)
-    similar = [item for item in similar if item not in yandex_historical]
-
     sources = [
-        {"name": "PastPhoto", "url": build_pastphoto_link(address), "description": "Открытый интерактивный фотоархив исторических снимков по месту."},
-        {"name": "PastVu", "url": "https://pastvu.com/", "description": "Исторические фотографии в радиусе от найденных координат."},
-        {"name": "Wikimedia Commons", "url": "https://commons.wikimedia.org/", "description": "Открытая база изображений и категорий."},
-        {"name": "Яндекс Картинки", "url": "https://yandex.ru/images/", "description": "Обратный поиск по исходной фотографии." if YANDEX_API_KEY and YANDEX_FOLDER_ID else "Не активирован: не заданы YANDEX_API_KEY и/или YANDEX_FOLDER_ID."},
+        {
+            "name": "PastPhoto",
+            "url": build_pastphoto_link(address),
+            "description": "Исторические фотографии по месту; источник для дополнительной ручной проверки.",
+        },
+        {
+            "name": "PastVu",
+            "url": "https://pastvu.com/",
+            "description": "Исторические фотографии рядом с найденными координатами.",
+        },
+        {
+            "name": "Wikimedia Commons",
+            "url": "https://commons.wikimedia.org/",
+            "description": "Открытая база изображений и категорий.",
+        },
+        {
+            "name": "OpenStreetMap / Nominatim",
+            "url": "https://www.openstreetmap.org/",
+            "description": "Геокодирование введённого адреса для пространственного поиска.",
+        },
     ]
 
     return {
@@ -386,5 +385,8 @@ async def identify(photo: UploadFile = File(...), address: str = Form(...), year
         "similar_images": dedupe_results(similar, 18),
         "historical_images": dedupe_results(historical, 18),
         "sources": sources,
-        "generation": {"enabled": False, "reason": "Генерация изображений отключена на этапе идентификации и поиска источников."},
+        "generation": {
+            "enabled": False,
+            "reason": "Генерация изображений отключена на этапе идентификации и поиска источников.",
+        },
     }
