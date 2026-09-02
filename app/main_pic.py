@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import re
 from typing import Any
 
 import httpx
@@ -9,31 +8,28 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image
 
-from .main import STATIC_DIR, MAX_UPLOAD_MB, TIMEWEB_TOKEN, build_pastphoto_link, extract_year, norm_text, pastvu_search, wikimedia_search
+from .main import STATIC_DIR, MAX_UPLOAD_MB, TIMEWEB_TOKEN, extract_year, norm_text, pastvu_search, wikimedia_search
 from .reverse_search import search as reverse_image_search
-from .visual_compare import verify_candidates, extract_address_hints
+from .visual_compare import extract_address_hints, verify_candidates
 
 app = FastAPI(title="AiWebCity", version="1.0.0-evidence-first")
-
-NOVOROSSIYSK_TERMS = ("новороссийск", "novorossiysk")
 
 
 def _is_novorossiysk(text: str) -> bool:
     value = norm_text(text).lower().replace("ё", "е")
-    return any(term in value for term in NOVOROSSIYSK_TERMS)
+    return "новороссийск" in value or "novorossiysk" in value
 
 
 async def _geocode_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
     hints = extract_address_hints(candidate)
-    source_text = norm_text(" ".join([
-        norm_text(candidate.get("title")),
-        norm_text(candidate.get("description")),
-        norm_text(candidate.get("site")),
-    ]))
+    title = norm_text(candidate.get("title"))
+    description = norm_text(candidate.get("description"))
+    site = norm_text(candidate.get("site"))
+    source_text = norm_text(" ".join([title, description, site]))
     if _is_novorossiysk(source_text):
         hints.append(source_text[:160])
-    if candidate.get("title"):
-        hints.append(norm_text(candidate.get("title"))[:160])
+    if title:
+        hints.append(title[:160])
 
     queries: list[str] = []
     seen: set[str] = set()
@@ -42,7 +38,6 @@ async def _geocode_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None
         if hint and hint not in seen:
             seen.add(hint)
             queries.append(hint)
-
     if not queries:
         return None
 
@@ -63,7 +58,6 @@ async def _geocode_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None
                     continue
                 addr = row.get("address") if isinstance(row.get("address"), dict) else {}
                 street = norm_text(addr.get("road") or addr.get("pedestrian") or addr.get("residential"))
-                house = norm_text(addr.get("house_number"))
                 if not street:
                     continue
                 return {
@@ -71,10 +65,10 @@ async def _geocode_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None
                     "lon": float(row["lon"]),
                     "display_name": display,
                     "street": street,
-                    "house_number": house,
+                    "house_number": norm_text(addr.get("house_number")),
                     "city": norm_text(addr.get("city") or addr.get("town") or "Новороссийск"),
                     "address_verified": True,
-                    "house_number_verified": bool(house),
+                    "house_number_verified": bool(norm_text(addr.get("house_number"))),
                 }
     return None
 
@@ -95,14 +89,14 @@ async def _verify_candidates(original: bytes, content_type: str, candidates: lis
     visual = await verify_candidates(original, content_type, candidates, limit=8)
     enriched: list[dict[str, Any]] = []
     for item in visual:
-        same_place = bool(item.get("same_place")) and float(item.get("confidence", 0.0)) >= 0.72
-        location = await _geocode_candidate(item) if same_place else None
-        copy = dict(item)
-        copy["visual_verified"] = same_place
-        copy["address_verified"] = bool(location)
-        copy["location"] = location
-        copy["resolved_address"] = _pretty_address(location)
-        enriched.append(copy)
+        visual_ok = bool(item.get("same_place")) and float(item.get("confidence", 0.0)) >= 0.72
+        location = await _geocode_candidate(item) if visual_ok else None
+        enriched_item = dict(item)
+        enriched_item["visual_verified"] = visual_ok
+        enriched_item["address_verified"] = bool(location)
+        enriched_item["location"] = location
+        enriched_item["resolved_address"] = _pretty_address(location)
+        enriched.append(enriched_item)
     return sorted(enriched, key=lambda x: (bool(x.get("visual_verified")) and bool(x.get("address_verified")), float(x.get("confidence", 0.0))), reverse=True)
 
 
@@ -152,8 +146,8 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
     except Exception as exc:
         raise HTTPException(400, "Не удалось прочитать изображение.") from exc
 
-    address = norm_text(address)
-    reverse_result = await reverse_image_search(raw, address=address)
+    address_hint = norm_text(address)
+    reverse_result = await reverse_image_search(raw, address=address_hint)
     candidates = reverse_result.get("results", [])
     if not candidates:
         return {
@@ -164,7 +158,7 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
             "candidate_images": [],
             "matched_images": [],
             "historical_images": [],
-            "message": "Внешний поиск не нашёл фотографий для визуальной проверки.",
+            "message": "Обратный поиск не нашёл фотографий, которые можно надёжно проверить визуально.",
             "privacy": {"server_storage": False},
             "generation": {"enabled": False},
         }
@@ -186,7 +180,10 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
             "confidence": float(best.get("confidence", 0.0)),
         }
         matched_images = [
-            {"image_url": x.get("image_url"), "confidence": float(x.get("confidence", 0.0)), "matching_features": x.get("matching_features", [])}
+            {
+                "image_url": x.get("image_url"),
+                "confidence": float(x.get("confidence", 0.0)),
+            }
             for x in accepted[:8]
             if x.get("image_url")
         ]
@@ -195,8 +192,11 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
     if place and place.get("lat") is not None and place.get("lon") is not None:
         requested_year = extract_year(year) or 1999
         historical.extend(await pastvu_search(float(place["lat"]), float(place["lon"]), requested_year))
-        terms = [place.get("address") or "", place.get("street") or ""]
-        queries = [f"Новороссийск {norm_text(x)}" for x in terms if norm_text(x)]
+        queries = [
+            f"Новороссийск {norm_text(place.get('address'))}",
+            f"Новороссийск {norm_text(place.get('street'))}",
+        ]
+        queries = list(dict.fromkeys(x for x in queries if x.strip() != "Новороссийск"))
         if queries:
             historical.extend(await wikimedia_search(queries, limit=12))
 
@@ -209,13 +209,13 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
         "matched_images": matched_images,
         "historical_images": _dedupe_images(historical, 24),
         "message": (
-            "Здание визуально подтверждено, затем его адрес подтверждён по открытым геоданным."
+            "Здание визуально подтверждено, затем проверен его адрес."
             if place else
             "Похожие фотографии найдены, но надёжного визуального совпадения с подтверждённым адресом нет."
         ),
         "privacy": {
             "server_storage": False,
-            "note": "Фотография не записывается на VPS; она используется только в памяти и временно передаётся внешним поисковым и AI-сервисам.",
+            "note": "Фото не записывается на VPS; оно используется в памяти и временно передаётся внешним поисковым и AI-сервисам.",
         },
         "generation": {"enabled": False},
         "debug": {"reverse_candidates": len(candidates), "visual_checks": len(verifications)},
