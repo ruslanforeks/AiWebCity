@@ -13,7 +13,7 @@ from .main import STATIC_DIR, MAX_UPLOAD_MB, TIMEWEB_TOKEN, extract_year, norm_t
 from .reverse_search import search as reverse_image_search
 from .visual_compare import extract_address_hints, verify_candidates
 
-app = FastAPI(title="AiWebCity", version="1.0.3-safe-originals")
+app = FastAPI(title="AiWebCity", version="1.0.4-recall")
 
 
 def _is_novorossiysk(text: str) -> bool:
@@ -106,7 +106,7 @@ def _pretty_address(location: dict[str, Any] | None) -> str:
 
 
 async def _verify_candidates(original: bytes, content_type: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    visual = await verify_candidates(original, content_type, candidates, limit=8)
+    visual = await verify_candidates(original, content_type, candidates, limit=12)
     enriched: list[dict[str, Any]] = []
     for item in visual:
         visual_ok = bool(item.get("same_place")) and float(item.get("confidence", 0.0)) >= 0.72
@@ -157,7 +157,7 @@ async def health() -> dict[str, Any]:
         "token_configured": bool(TIMEWEB_TOKEN),
         "reverse_search": "PicImageSearch with Yandex originalImage extraction + Google Lens",
         "reverse_search_engines": ["Yandex Images (original when available)", "Google Lens"],
-        "identification_mode": "reverse-search-then-visual-verification",
+        "identification_mode": "reverse-search-variants-then-visual-verification",
         "city_scope": "Новороссийск",
         "photo_persistence": False,
         "generation": False,
