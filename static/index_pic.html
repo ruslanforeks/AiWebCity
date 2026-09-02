@@ -1,2 +1,146 @@
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AiWebCity — поиск здания</title><style>body{font-family:Inter,system-ui,sans-serif;background:#f5f6f8;color:#17191d;margin:0}.wrap{max-width:1050px;margin:auto;padding:28px 16px}.card{background:#fff;border:1px solid #e3e6eb;border-radius:20px;padding:20px;margin:18px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.field{margin-bottom:14px}.field label{display:block;font-weight:700;margin-bottom:7px}.field input{width:100%;box-sizing:border-box;padding:13px;border:1px solid #ddd;border-radius:12px;font:inherit}.upload{display:flex;min-height:180px;border:1.5px dashed #c6ccd6;border-radius:16px;align-items:center;justify-content:center;text-align:center;cursor:pointer}.upload input{display:none}.preview img{max-width:100%;max-height:320px;border-radius:14px;margin-top:12px}.button{padding:13px 18px;border:0;border-radius:12px;background:#1f6feb;color:white;font-weight:800;cursor:pointer}.button:disabled{opacity:.5}.muted{color:#6d7480}.notice{background:#fff7e6;border:1px solid #efd38e;border-radius:12px;padding:12px}.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.item{border:1px solid #e3e6eb;border-radius:14px;overflow:hidden}.item img{width:100%;aspect-ratio:4/3;object-fit:cover;background:#eee}.item div{padding:10px}.item a{color:#1f6feb;text-decoration:none;font-weight:700}.candidate{padding:12px;border:1px solid #e3e6eb;border-radius:12px;margin:8px 0}.badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#f0f2f5;font-size:12px;font-weight:800;margin-left:6px}.high{background:#e9f8ef}.medium{background:#fff4d6}@media(max-width:720px){.grid,.cards{grid-template-columns:1fr}}
-</style></head><body><main class="wrap"><h1>Что это за здание?</h1><p class="muted">Фото + адрес → Yandex Images / Google Lens → открытые архивы. Фото не сохраняется на VPS.</p><section class="card"><form id="form"><div class="grid"><div><div class="field"><label>Адрес здания</label><input name="address" placeholder="Новороссийск, ул. Советов, 15" required></div><div class="field"><label>Исторический период <span class="muted">(необязательно)</span></label><input name="year" placeholder="1913 или 1900–1940"></div><div class="notice">Для reverse image search фотография временно отправляется Yandex и Google через PicImageSearch. Сервер AiWebCity её не сохраняет.</div></div><div><label class="upload"><input id="photo" name="photo" type="file" accept="image/jpeg,image/png,image/webp" required><span><b>Нажмите или перетащите фотографию</b><br><span class="muted">JPG, PNG, WEBP · до 12 МБ</span></span></label><div class="preview"><img id="previewImg" alt="Предпросмотр" style="display:none"></div></div></div><div style="margin-top:14px"><button class="button" id="submit">Найти здание</button> <span id="status" class="muted" style="margin-left:10px">Готово к поиску</span></div></form></section><section id="result" class="card" style="display:none"></section></main><script>const form=document.getElementById('form'),photo=document.getElementById('photo'),previewImg=document.getElementById('previewImg'),submit=document.getElementById('submit'),status=document.getElementById('status'),result=document.getElementById('result');photo.onchange=()=>{const f=photo.files[0];if(f){previewImg.src=URL.createObjectURL(f);previewImg.style.display='block'}};const esc=s=>String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\\':'&#92;','"':'&quot;'}[c]));function cards(items){if(!items?.length)return '<div class="notice">Результатов не найдено.</div>';return '<div class="cards">'+items.map(x=>'<article class="item">'+(x.image_url?'<img loading="lazy" src="'+esc(x.image_url)+'" onerror="this.style.display=\'none\'">':'')+'<div><b>'+esc(x.title||x.source||'Источник')+'</b><p class="muted">'+esc(x.source||'')+(x.year?' · '+esc(x.year):'')+(x.description?' — '+esc(x.description):'')+'</p>'+(x.page_url?'<a href="'+esc(x.page_url)+'" target="_blank" rel="noopener">Открыть источник ↗</a>':'')+'</div></article>').join('')+'</div>'}form.onsubmit=async e=>{e.preventDefault();submit.disabled=true;status.textContent='Ищем по фото и архивам…';result.style.display='none';try{const r=await fetch('/api/identify',{method:'POST',body:new FormData(form)});const d=await r.json();if(!r.ok)throw new Error(d.detail||'Ошибка');const c=d.identification?.candidates||[];const cand=c.length?c.map(x=>'<div class="candidate"><b>'+esc(x.name||'Неизвестный объект')+'</b><span class="badge '+esc(x.confidence)+'">'+(x.confidence==='high'?'Высокая':x.confidence==='medium'?'Средняя':'Низкая')+'</span><div class="muted" style="margin-top:6px">'+esc(x.reason||'')+'</div></div>').join(''):'<div class="notice">AI не смог предложить уверенного кандидата. Смотрим на реальные результаты reverse search.</div>';const engines=(d.reverse_image_search?.engines||[]).map(e=>'<span class="badge '+(e.ok?'high':'')+'">'+esc(e.name)+' — '+(e.ok?e.results+' результатов':'ошибка')+'</span>').join(' ');result.innerHTML='<h2>Результаты</h2><p class="muted">'+esc(d.address)+'</p><h3>Что увидел AI</h3><p>'+esc(d.analysis?.what_is_visible||'')+'</p><h3>Вероятно, это…</h3>'+cand+'<h3>Reverse image search</h3><p>'+engines+'</p><h3>Результаты по фотографии</h3>'+cards(d.reverse_image_search?.results||[])+'<h3>Похожие открытые изображения</h3>'+cards(d.similar_images||[])+'<h3>Исторические фотографии</h3>'+cards(d.historical_images||[])+'<h3>Источники</h3><p>'+((d.sources||[]).map(s=>'<a href="'+esc(s.url)+'" target="_blank" rel="noopener">'+esc(s.name)+'</a>').join(' · '))+'</p><div class="notice">Фото не записывается на VPS. После завершения запроса оно исчезает из памяти процесса; однако Yandex/Google получают изображение для выполнения своего поиска.</div>';result.style.display='block';status.textContent='Поиск завершён'}catch(err){status.textContent=err.message||'Ошибка'}finally{submit.disabled=false}};</script></body></html>
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AiWebCity — поиск здания</title>
+<style>
+body{font-family:Inter,system-ui,sans-serif;background:#f5f6f8;color:#17191d;margin:0}
+.wrap{max-width:1050px;margin:auto;padding:28px 16px}
+.card{background:#fff;border:1px solid #e3e6eb;border-radius:20px;padding:20px;margin:18px 0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.field{margin-bottom:14px}
+.field label{display:block;font-weight:700;margin-bottom:7px}
+.field input{width:100%;box-sizing:border-box;padding:13px;border:1px solid #ddd;border-radius:12px;font:inherit}
+.upload{display:flex;min-height:180px;border:1.5px dashed #c6ccd6;border-radius:16px;align-items:center;justify-content:center;text-align:center;cursor:pointer}
+.upload input{display:none}
+.preview img{max-width:100%;max-height:320px;border-radius:14px;margin-top:12px}
+.button{padding:13px 18px;border:0;border-radius:12px;background:#1f6feb;color:white;font-weight:800;cursor:pointer}
+.button:disabled{opacity:.5}
+.muted{color:#6d7480}
+.notice{background:#fff7e6;border:1px solid #efd38e;border-radius:12px;padding:12px}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.item{border:1px solid #e3e6eb;border-radius:14px;overflow:hidden;background:#fff}
+.item img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;background:#eee}
+.item .photo-note{padding:9px 10px;font-size:12px;color:#6d7480}
+.candidate{padding:12px;border:1px solid #e3e6eb;border-radius:12px;margin:8px 0}
+.badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#f0f2f5;font-size:12px;font-weight:800;margin-left:6px}
+.high{background:#e9f8ef}
+.medium{background:#fff4d6}
+.section-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:24px}
+.count{font-size:13px;color:#6d7480;font-weight:700}
+@media(max-width:720px){.grid,.cards{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <h1>Что это за здание?</h1>
+  <p class="muted">Фото + адрес → поиск совпадений и исторических фотографий. Сейчас работаем только по Новороссийску.</p>
+
+  <section class="card">
+    <form id="form">
+      <div class="grid">
+        <div>
+          <div class="field">
+            <label>Адрес здания</label>
+            <input name="address" placeholder="Новороссийск, ул. Советов, 15" required>
+          </div>
+          <div class="field">
+            <label>Исторический период <span class="muted">(необязательно)</span></label>
+            <input name="year" placeholder="1913 или 1900–1940">
+          </div>
+          <div class="notice">Фото не сохраняется на сервере AiWebCity. Для поиска изображение временно передаётся внешним поисковым сервисам.</div>
+        </div>
+        <div>
+          <label class="upload">
+            <input id="photo" name="photo" type="file" accept="image/jpeg,image/png,image/webp" required>
+            <span><b>Нажмите или перетащите фотографию</b><br><span class="muted">JPG, PNG, WEBP · до 12 МБ</span></span>
+          </label>
+          <div class="preview"><img id="previewImg" alt="Предпросмотр" style="display:none"></div>
+        </div>
+      </div>
+      <div style="margin-top:14px">
+        <button class="button" id="submit">Найти здание</button>
+        <span id="status" class="muted" style="margin-left:10px">Готово к поиску</span>
+      </div>
+    </form>
+  </section>
+
+  <section id="result" class="card" style="display:none"></section>
+</main>
+
+<script>
+const form=document.getElementById('form');
+const photo=document.getElementById('photo');
+const previewImg=document.getElementById('previewImg');
+const submit=document.getElementById('submit');
+const status=document.getElementById('status');
+const result=document.getElementById('result');
+
+photo.onchange=()=>{
+  const f=photo.files[0];
+  if(f){
+    previewImg.src=URL.createObjectURL(f);
+    previewImg.style.display='block';
+  }
+};
+
+const esc=s=>String(s??'').replace(/[&<>\\"]/g,c=>({
+  '&':'&amp;','<':'&lt;','>':'&gt;','\\':'&#92;','"':'&quot;'
+}[c]));
+
+function cards(items){
+  if(!items?.length) return '<div class="notice">Подходящих фотографий не найдено.</div>';
+  return '<div class="cards">'+items.map(x=>
+    '<article class="item">'+
+      (x.image_url?'<img loading="lazy" src="'+esc(x.image_url)+'" alt="" onerror="this.closest(\'.item\').style.display=\'none\'">':'')+
+    '</article>'
+  ).join('')+'</div>';
+}
+
+form.onsubmit=async e=>{
+  e.preventDefault();
+  submit.disabled=true;
+  status.textContent='Ищем совпадения по Новороссийску…';
+  result.style.display='none';
+  try{
+    const r=await fetch('/api/identify',{method:'POST',body:new FormData(form)});
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||'Ошибка');
+
+    const candidates=d.identification?.candidates||[];
+    const cand=candidates.length
+      ? candidates.map(x=>
+          '<div class="candidate"><b>'+esc(x.name||'Неизвестный объект')+'</b>'+
+          '<span class="badge '+esc(x.confidence)+'">'+
+            (x.confidence==='high'?'Высокая':x.confidence==='medium'?'Средняя':'Низкая')+
+          '</span>'+
+          (x.reason?'<div class="muted" style="margin-top:6px">'+esc(x.reason)+'</div>':'')+
+          '</div>'
+        ).join('')
+      : '<div class="notice">Точного кандидата по самому фото пока определить не удалось. Ниже показаны найденные совпадения.</div>';
+
+    const similar=d.similar_images||[];
+    const historical=d.historical_images||[];
+
+    result.innerHTML=
+      '<h2>Результаты</h2>'+
+      '<p class="muted">'+esc(d.address)+'</p>'+
+      '<h3>Вероятно, это…</h3>'+cand+
+      '<div class="section-title"><h3>Похожие фотографии</h3><span class="count">'+similar.length+' фото</span></div>'+
+      cards(similar)+
+      '<div class="section-title"><h3>Исторические фотографии</h3><span class="count">'+historical.length+' фото</span></div>'+
+      cards(historical)+
+      '<div class="notice" style="margin-top:20px">Поиск ограничен Новороссийском. Фото не сохраняется на VPS после обработки.</div>';
+
+    result.style.display='block';
+    status.textContent='Поиск завершён';
+  }catch(err){
+    status.textContent=err.message||'Ошибка';
+  }finally{
+    submit.disabled=false;
+  }
+};
+</script>
+</body>
+</html>

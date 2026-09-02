@@ -1,42 +1,282 @@
 from __future__ import annotations
+
 import asyncio
 import re
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
 from PicImageSearch import GoogleLens, Network, Yandex
-REVERSE_SEARCH_TIMEOUT=45.0
-REVERSE_SEARCH_RESULTS=20
-def norm_text(value: Any)->str:
-    return re.sub(r"\s+"," ",str(value or "")).strip()
-def extract_year(text:str)->int|None:
-    years=[int(x) for x in re.findall(r"(?<!\d)(1[5-9]\d{2}|20\d{2})(?!\d)",text)]
+
+REVERSE_SEARCH_TIMEOUT = 45.0
+REVERSE_SEARCH_RESULTS = 24
+FINAL_RESULTS = 10
+
+NOVOROSSIYSK_TERMS = {
+    "новороссийск",
+    "novorossiysk",
+    "новороссийского",
+    "новороссийске",
+    "новороссийском",
+}
+
+# Strong negative signals for obvious results from another city or another object type.
+OTHER_CITIES = {
+    "геленджик",
+    "геледжик",
+    "анапа",
+    "краснодар",
+    "сочи",
+    "ростов-на-дону",
+    "ростов на дону",
+    "майкоп",
+    "туапсе",
+    "армавир",
+    "керчь",
+    "севастополь",
+    "симферополь",
+}
+NOISE_TERMS = {
+    "интерьер",
+    "квартира",
+    "комната",
+    "кухня",
+    "ванная",
+    "планировка",
+    "обои",
+    "мебель",
+    "диван",
+    "товар",
+    "каталог",
+    "автомобиль",
+    "машина",
+    "мотоцикл",
+    "телефон",
+    "обои на телефон",
+    "декор",
+    "дизайн интерьера",
+}
+
+
+def norm_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def normalize_url(value: Any) -> str:
+    value = norm_text(value)
+    if not value:
+        return ""
+    try:
+        parts = urlsplit(value)
+        if not parts.netloc:
+            return value.lower().rstrip("/")
+        # Drop common tracking parameters while preserving stable image/page identity.
+        keep = []
+        for key, val in parse_qsl(parts.query, keep_blank_values=True):
+            key_lower = key.lower()
+            if key_lower.startswith("utm_") or key_lower in {"from", "ref", "source", "tracking"}:
+                continue
+            keep.append((key, val))
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), urlencode(keep), "")).lower()
+    except Exception:
+        return value.lower().rstrip("/")
+
+
+def image_identity(image_url: str) -> str:
+    normalized = normalize_url(image_url)
+    if not normalized:
+        return ""
+    match = re.search(r"[?&]id=([a-z0-9_-]{12,})", normalized, re.I)
+    if match:
+        return f"yandex-id:{match.group(1).lower()}"
+    match = re.search(r"/i\?id=([a-z0-9_-]{12,})", normalized, re.I)
+    if match:
+        return f"yandex-id:{match.group(1).lower()}"
+    return normalized
+
+
+def extract_year(text: str) -> int | None:
+    years = [int(x) for x in re.findall(r"(?<!\d)(1[5-9]\d{2}|20\d{2})(?!\d)", text)]
     return min(years) if years else None
-def item_to_dict(item:Any,source:str)->dict[str,Any]:
-    title=norm_text(getattr(item,"title","")); page_url=norm_text(getattr(item,"url","")); thumb=norm_text(getattr(item,"thumbnail","")); desc=norm_text(getattr(item,"content","")); site=norm_text(getattr(item,"source","")); size=norm_text(getattr(item,"size",""))
-    return {"image_url":thumb,"page_url":page_url,"title":title or f"Результат {source}","description":desc,"source":source,"kind":"reverse_image","site":site,"size":size,"year":extract_year(" ".join([title,desc,page_url]))}
-def dedupe(items:list[dict[str,Any]],limit:int=40)->list[dict[str,Any]]:
-    seen=set(); out=[]
+
+
+def item_to_dict(item: Any, source: str) -> dict[str, Any]:
+    title = norm_text(getattr(item, "title", ""))
+    page_url = norm_text(getattr(item, "url", ""))
+    thumb = norm_text(getattr(item, "thumbnail", ""))
+    desc = norm_text(getattr(item, "content", ""))
+    site = norm_text(getattr(item, "source", ""))
+    size = norm_text(getattr(item, "size", ""))
+    return {
+        "image_url": thumb,
+        "page_url": page_url,
+        "title": title or f"Результат {source}",
+        "description": desc,
+        "source": source,
+        "kind": "reverse_image",
+        "site": site,
+        "size": size,
+        "year": extract_year(" ".join([title, desc, page_url])),
+    }
+
+
+def _tokens_for_address(address: str) -> tuple[list[str], str]:
+    clean = norm_text(address).lower()
+    clean = clean.replace("ё", "е")
+    # Keep words that are useful for exact-place matching, but ignore generic city/road words.
+    tokens = [t for t in re.findall(r"[a-zа-я0-9-]+", clean) if len(t) >= 3]
+    street_tokens = [t for t in tokens if t not in {"россия", "край", "город", "г", "ул", "улица", "проспект", "пр", "дом", "д"}]
+    number_match = re.search(r"\b(\d{1,4}[а-яa-z]?)\b", clean)
+    number = number_match.group(1) if number_match else ""
+    return street_tokens, number
+
+
+def _result_text(item: dict[str, Any]) -> str:
+    return " ".join(
+        norm_text(item.get(key)) for key in ("title", "description", "site", "page_url", "image_url")
+    ).lower().replace("ё", "е")
+
+
+def rank_novorossiysk(items: list[dict[str, Any]], address: str, limit: int = FINAL_RESULTS) -> list[dict[str, Any]]:
+    address_lower = norm_text(address).lower().replace("ё", "е")
+    street_tokens, house_number = _tokens_for_address(address)
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+
+    for position, item in enumerate(items):
+        image_url = norm_text(item.get("image_url"))
+        page_url = norm_text(item.get("page_url"))
+        if not image_url:
+            continue
+        text = _result_text(item)
+        score = 0
+
+        # The project is city-locked: results explicitly naming another target city are discarded.
+        if any(city in text for city in OTHER_CITIES):
+            continue
+
+        if any(term in text for term in NOVOROSSIYSK_TERMS):
+            score += 45
+
+        exact_address = address_lower and address_lower in text
+        if exact_address:
+            score += 140
+
+        matched_street = sum(1 for token in street_tokens if token in text)
+        if matched_street:
+            score += min(matched_street, 4) * 18
+
+        if house_number and re.search(rf"(?<!\d){re.escape(house_number)}(?!\d)", text):
+            score += 55
+
+        # Pages that mention the exact place in URL/title are preferable to generic visual lookalikes.
+        if any(term in norm_text(item.get("page_url")).lower() for term in street_tokens[:3]):
+            score += 20
+
+        if any(term in text for term in NOISE_TERMS):
+            score -= 80
+
+        # Reverse-search ordering is only a weak prior; never let it override address evidence.
+        score += max(0, 12 - position // 2)
+
+        item = dict(item)
+        item["match_score"] = score
+        scored.append((score, -position, item))
+
+    # Deduplicate by stable page URL, image URL and Yandex image id. This catches repeated
+    # thumbnails of the same photo even when Yandex exposes them through different source pages.
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for _, _, item in sorted(scored, key=lambda row: (row[0], row[1]), reverse=True):
+        keys = [
+            normalize_url(item.get("page_url")),
+            image_identity(norm_text(item.get("image_url"))),
+        ]
+        key = next((k for k in keys if k), "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        item.pop("match_score", None)
+        result.append(item)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def dedupe(items: list[dict[str, Any]], limit: int = 40) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
     for item in items:
-        key=norm_text(item.get("page_url")) or norm_text(item.get("image_url"))
-        if not key or key in seen: continue
-        seen.add(key); out.append(item)
-        if len(out)>=limit: break
+        keys = [normalize_url(item.get("page_url")), image_identity(norm_text(item.get("image_url")))]
+        key = next((k for k in keys if k), "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+        if len(out) >= limit:
+            break
     return out
-async def yandex_search(image_bytes:bytes)->dict[str,Any]:
+
+
+async def yandex_search(image_bytes: bytes) -> dict[str, Any]:
     try:
         async with Network(timeout=REVERSE_SEARCH_TIMEOUT) as client:
-            engine=Yandex(client=client,base_url="https://yandex.com")
-            response=await asyncio.wait_for(engine.search(file=image_bytes),timeout=REVERSE_SEARCH_TIMEOUT)
-        return {"engine":"Yandex Images","ok":True,"results":[item_to_dict(i,"Yandex Images") for i in (response.raw or [])][:REVERSE_SEARCH_RESULTS],"search_url":norm_text(getattr(response,"url","")) or None,"error":None}
+            engine = Yandex(client=client, base_url="https://yandex.com")
+            response = await asyncio.wait_for(
+                engine.search(file=image_bytes), timeout=REVERSE_SEARCH_TIMEOUT
+            )
+        return {
+            "engine": "Yandex Images",
+            "ok": True,
+            "results": [
+                item_to_dict(i, "Yandex Images") for i in (response.raw or [])
+            ][:REVERSE_SEARCH_RESULTS],
+            "search_url": norm_text(getattr(response, "url", "")) or None,
+            "error": None,
+        }
     except Exception as exc:
-        return {"engine":"Yandex Images","ok":False,"results":[],"search_url":None,"error":f"{type(exc).__name__}: {str(exc)[:300]}"}
-async def google_lens_search(image_bytes:bytes)->dict[str,Any]:
+        return {
+            "engine": "Yandex Images",
+            "ok": False,
+            "results": [],
+            "search_url": None,
+            "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+        }
+
+
+async def google_lens_search(image_bytes: bytes) -> dict[str, Any]:
     try:
         async with Network(timeout=REVERSE_SEARCH_TIMEOUT) as client:
-            engine=GoogleLens(client=client,search_type="all",hl="ru",country="RU")
-            response=await asyncio.wait_for(engine.search(file=image_bytes),timeout=REVERSE_SEARCH_TIMEOUT)
-        return {"engine":"Google Lens","ok":True,"results":[item_to_dict(i,"Google Lens") for i in (response.raw or [])][:REVERSE_SEARCH_RESULTS],"search_url":norm_text(getattr(response,"url","")) or None,"error":None}
+            engine = GoogleLens(client=client, search_type="all", hl="ru", country="RU")
+            response = await asyncio.wait_for(
+                engine.search(file=image_bytes), timeout=REVERSE_SEARCH_TIMEOUT
+            )
+        return {
+            "engine": "Google Lens",
+            "ok": True,
+            "results": [
+                item_to_dict(i, "Google Lens") for i in (response.raw or [])
+            ][:REVERSE_SEARCH_RESULTS],
+            "search_url": norm_text(getattr(response, "url", "")) or None,
+            "error": None,
+        }
     except Exception as exc:
-        return {"engine":"Google Lens","ok":False,"results":[],"search_url":None,"error":f"{type(exc).__name__}: {str(exc)[:300]}"}
-async def search(image_bytes:bytes)->dict[str,Any]:
-    yandex,lens=await asyncio.gather(yandex_search(image_bytes),google_lens_search(image_bytes))
-    return {"enabled":True,"engines":[yandex,lens],"results":dedupe(yandex["results"]+lens["results"])}
+        return {
+            "engine": "Google Lens",
+            "ok": False,
+            "results": [],
+            "search_url": None,
+            "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+        }
+
+
+async def search(image_bytes: bytes, address: str = "") -> dict[str, Any]:
+    yandex, lens = await asyncio.gather(
+        yandex_search(image_bytes), google_lens_search(image_bytes)
+    )
+    raw = dedupe(yandex["results"] + lens["results"], limit=48)
+    filtered = rank_novorossiysk(raw, address, limit=FINAL_RESULTS) if address else raw[:FINAL_RESULTS]
+    return {
+        "enabled": True,
+        "engines": [yandex, lens],
+        "results": filtered,
+        "raw_result_count": len(raw),
+    }
