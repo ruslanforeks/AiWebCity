@@ -9,47 +9,41 @@ body{font-family:Inter,system-ui,sans-serif;background:#f5f6f8;color:#17191d;mar
 .wrap{max-width:1050px;margin:auto;padding:28px 16px}
 .card{background:#fff;border:1px solid #e3e6eb;border-radius:20px;padding:20px;margin:18px 0}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.field{margin-bottom:14px}
-.field label{display:block;font-weight:700;margin-bottom:7px}
+.field{margin-bottom:14px}.field label{display:block;font-weight:700;margin-bottom:7px}
 .field input{width:100%;box-sizing:border-box;padding:13px;border:1px solid #ddd;border-radius:12px;font:inherit}
 .upload{display:flex;min-height:180px;border:1.5px dashed #c6ccd6;border-radius:16px;align-items:center;justify-content:center;text-align:center;cursor:pointer}
-.upload input{display:none}
-.preview img{max-width:100%;max-height:320px;border-radius:14px;margin-top:12px}
-.button{padding:13px 18px;border:0;border-radius:12px;background:#1f6feb;color:white;font-weight:800;cursor:pointer}
-.button:disabled{opacity:.5}
-.muted{color:#6d7480}
-.notice{background:#fff7e6;border:1px solid #efd38e;border-radius:12px;padding:12px}
-.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
-.item{border:1px solid #e3e6eb;border-radius:14px;overflow:hidden;background:#fff}
+.upload input{display:none}.preview img{max-width:100%;max-height:320px;border-radius:14px;margin-top:12px}
+.button{padding:13px 18px;border:0;border-radius:12px;background:#1f6feb;color:white;font-weight:800;cursor:pointer}.button:disabled{opacity:.5}
+.muted{color:#6d7480}.notice{background:#f7f8fa;border:1px solid #e1e5ea;border-radius:12px;padding:12px}
+.success{background:#edf9f0;border-color:#bde4c8}.warning{background:#fff8e8;border-color:#efd99b}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.item{border:1px solid #e3e6eb;border-radius:14px;overflow:hidden;background:#fff}
 .item img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;background:#eee}
-.item .photo-note{padding:9px 10px;font-size:12px;color:#6d7480}
-.candidate{padding:12px;border:1px solid #e3e6eb;border-radius:12px;margin:8px 0}
-.badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#f0f2f5;font-size:12px;font-weight:800;margin-left:6px}
-.high{background:#e9f8ef}
-.medium{background:#fff4d6}
-.section-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:24px}
-.count{font-size:13px;color:#6d7480;font-weight:700}
+.badge{display:inline-block;padding:5px 9px;border-radius:999px;background:#f0f2f5;font-size:12px;font-weight:800;margin-left:7px}
+.high{background:#e9f8ef}.medium{background:#fff4d6}
+.section-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:24px}.count{font-size:13px;color:#6d7480;font-weight:700}
+.place{font-size:22px;font-weight:850;margin-top:6px}.evidence{margin-top:12px;padding-left:18px}.evidence li{margin:6px 0;color:#4d5560}
 @media(max-width:720px){.grid,.cards{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <main class="wrap">
   <h1>Что это за здание?</h1>
-  <p class="muted">Фото + адрес → поиск совпадений и исторических фотографий. Сейчас работаем только по Новороссийску.</p>
+  <p class="muted">Фото + адрес-подсказка → определение места и поиск исторических фотографий. Только Новороссийск.</p>
 
   <section class="card">
     <form id="form">
       <div class="grid">
         <div>
           <div class="field">
-            <label>Адрес здания</label>
+            <label>Адрес-подсказка</label>
             <input name="address" placeholder="Новороссийск, ул. Советов, 15" required>
           </div>
           <div class="field">
             <label>Исторический период <span class="muted">(необязательно)</span></label>
             <input name="year" placeholder="1913 или 1900–1940">
           </div>
-          <div class="notice">Фото не сохраняется на сервере AiWebCity. Для поиска изображение временно передаётся внешним поисковым сервисам.</div>
+          <div class="notice">Введённый адрес не считается правильным автоматически — сервис проверяет его по данным фотографии и внешнего поиска.</div>
+          <div class="notice" style="margin-top:10px">Фото не сохраняется на сервере AiWebCity. Для обратного поиска изображение временно передаётся внешним сервисам.</div>
         </div>
         <div>
           <label class="upload">
@@ -70,76 +64,32 @@ body{font-family:Inter,system-ui,sans-serif;background:#f5f6f8;color:#17191d;mar
 </main>
 
 <script>
-const form=document.getElementById('form');
-const photo=document.getElementById('photo');
-const previewImg=document.getElementById('previewImg');
-const submit=document.getElementById('submit');
-const status=document.getElementById('status');
-const result=document.getElementById('result');
-
-photo.onchange=()=>{
-  const f=photo.files[0];
-  if(f){
-    previewImg.src=URL.createObjectURL(f);
-    previewImg.style.display='block';
-  }
-};
-
-const esc=s=>String(s??'').replace(/[&<>\\"]/g,c=>({
-  '&':'&amp;','<':'&lt;','>':'&gt;','\\':'&#92;','"':'&quot;'
-}[c]));
-
-function cards(items){
-  if(!items?.length) return '<div class="notice">Подходящих фотографий не найдено.</div>';
-  return '<div class="cards">'+items.map(x=>
-    '<article class="item">'+
-      (x.image_url?'<img loading="lazy" src="'+esc(x.image_url)+'" alt="" onerror="this.closest(\'.item\').style.display=\'none\'">':'')+
-    '</article>'
-  ).join('')+'</div>';
-}
-
+const form=document.getElementById('form'),photo=document.getElementById('photo'),previewImg=document.getElementById('previewImg'),submit=document.getElementById('submit'),status=document.getElementById('status'),result=document.getElementById('result');
+photo.onchange=()=>{const f=photo.files[0];if(f){previewImg.src=URL.createObjectURL(f);previewImg.style.display='block'}};
+const esc=s=>String(s??'').replace(/[&<>\\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\\':'&#92;','"':'&quot;'}[c]));
+function cards(items){if(!items?.length)return '<div class="notice">Подходящих фотографий не найдено.</div>';return '<div class="cards">'+items.map(x=>'<article class="item">'+(x.image_url?'<img loading="lazy" src="'+esc(x.image_url)+'" alt="" onerror="this.closest(\'.item\').style.display=\'none\'">':'')+'</article>').join('')+'</div>'}
+function confidenceLabel(v){return v==='high'?'Высокая уверенность':v==='medium'?'Средняя уверенность':'Низкая уверенность'}
 form.onsubmit=async e=>{
-  e.preventDefault();
-  submit.disabled=true;
-  status.textContent='Ищем совпадения по Новороссийску…';
-  result.style.display='none';
+  e.preventDefault();submit.disabled=true;status.textContent='Определяем место по фотографии…';result.style.display='none';
   try{
-    const r=await fetch('/api/identify',{method:'POST',body:new FormData(form)});
-    const d=await r.json();
-    if(!r.ok) throw new Error(d.detail||'Ошибка');
-
-    const candidates=d.identification?.candidates||[];
-    const cand=candidates.length
-      ? candidates.map(x=>
-          '<div class="candidate"><b>'+esc(x.name||'Неизвестный объект')+'</b>'+
-          '<span class="badge '+esc(x.confidence)+'">'+
-            (x.confidence==='high'?'Высокая':x.confidence==='medium'?'Средняя':'Низкая')+
-          '</span>'+
-          (x.reason?'<div class="muted" style="margin-top:6px">'+esc(x.reason)+'</div>':'')+
-          '</div>'
-        ).join('')
-      : '<div class="notice">Точного кандидата по самому фото пока определить не удалось. Ниже показаны найденные совпадения.</div>';
-
-    const similar=d.similar_images||[];
-    const historical=d.historical_images||[];
-
-    result.innerHTML=
-      '<h2>Результаты</h2>'+
-      '<p class="muted">'+esc(d.address)+'</p>'+
-      '<h3>Вероятно, это…</h3>'+cand+
-      '<div class="section-title"><h3>Похожие фотографии</h3><span class="count">'+similar.length+' фото</span></div>'+
-      cards(similar)+
-      '<div class="section-title"><h3>Исторические фотографии</h3><span class="count">'+historical.length+' фото</span></div>'+
-      cards(historical)+
-      '<div class="notice" style="margin-top:20px">Поиск ограничен Новороссийском. Фото не сохраняется на VPS после обработки.</div>';
-
-    result.style.display='block';
-    status.textContent='Поиск завершён';
-  }catch(err){
-    status.textContent=err.message||'Ошибка';
-  }finally{
-    submit.disabled=false;
-  }
+    const r=await fetch('/api/identify',{method:'POST',body:new FormData(form)}),d=await r.json();
+    if(!r.ok)throw new Error(d.detail||'Ошибка');
+    const id=d.identification||{},best=d.identified_place;
+    let identityHtml='';
+    if(best){
+      const cls=best.confidence==='high'?'success':best.confidence==='medium'?'warning':'';
+      const ev=(best.evidence||[]).slice(0,3).map(x=>'<li>'+esc(x)+'</li>').join('');
+      identityHtml='<div class="notice '+cls+'"><div class="muted">Место на фотографии</div><div class="place">'+esc(best.address)+'</div><div style="margin-top:8px"><span class="badge '+esc(best.confidence)+'">'+esc(confidenceLabel(best.confidence))+'</span></div>'+(ev?'<ul class="evidence">'+ev+'</ul>':'')+'</div>';
+    }else{
+      identityHtml='<div class="notice warning"><b>Надёжно определить конкретный адрес пока не удалось.</b><div class="muted" style="margin-top:6px">Сервис не будет выдавать догадку за найденное здание. Похожие фотографии всё равно показаны ниже.</div></div>';
+    }
+    const similar=d.similar_images||[],historical=d.historical_images||[];
+    result.innerHTML='<h2>Результаты</h2>'+identityHtml+
+      '<div class="section-title"><h3>Похожие фотографии</h3><span class="count">'+similar.length+' фото</span></div>'+cards(similar)+
+      '<div class="section-title"><h3>Исторические фотографии</h3><span class="count">'+historical.length+' фото</span></div>'+cards(historical)+
+      '<div class="notice" style="margin-top:20px">Поиск ограничен Новороссийском. Если конкретное место не подтверждено, исторические фотографии для чужой точки не подставляются.</div>';
+    result.style.display='block';status.textContent='Поиск завершён';window.scrollTo({top:result.offsetTop-12,behavior:'smooth'});
+  }catch(err){status.textContent=err.message||'Ошибка'}finally{submit.disabled=false}
 };
 </script>
 </body>
