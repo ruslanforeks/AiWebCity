@@ -31,12 +31,18 @@ TIMEWEB_TOKEN = os.getenv("TIMEWEB_AI_TOKEN", "").strip()
 VISION_MODEL = os.getenv("TIMEWEB_VISION_MODEL", "openai/gpt-4.1-mini")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "12"))
 
+# Optional commercial reverse-image provider. Disabled by default.
+YANDEX_IMAGE_SEARCH_ENABLED = os.getenv("YANDEX_IMAGE_SEARCH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "").strip()
+YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID", "").strip()
+YANDEX_IMAGE_URL = "https://searchapi.api.cloud.yandex.net/v2/image/search_by_image"
+
 PASTVU_API_URL = "https://api.pastvu.com/api2"
 WIKIMEDIA_API_URL = "https://commons.wikimedia.org/w/api.php"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 PASTPHOTO_BASE = "https://pastphoto.ru/place/"
 
-app = FastAPI(title="AiWebCity", version="0.5.0")
+app = FastAPI(title="AiWebCity", version="0.6.0")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.mount("/results", StaticFiles(directory=str(RESULTS_DIR)), name="results")
 
@@ -140,7 +146,7 @@ async def analyze_photo(image_bytes: bytes, content_type: str, address: str, yea
 
 
 async def geocode_address(address: str) -> dict[str, Any] | None:
-    headers = {"User-Agent": "AiWebCity/0.5 (+https://aiweb.su/)"}
+    headers = {"User-Agent": "AiWebCity/0.6 (+https://aiweb.su/)"}
     params = {"q": address, "format": "jsonv2", "limit": 1, "addressdetails": 1}
     try:
         async with httpx.AsyncClient(timeout=15, headers=headers) as client:
@@ -151,11 +157,7 @@ async def geocode_address(address: str) -> dict[str, Any] | None:
         if not rows:
             return None
         row = rows[0]
-        return {
-            "lat": float(row["lat"]),
-            "lon": float(row["lon"]),
-            "display_name": row.get("display_name", ""),
-        }
+        return {"lat": float(row["lat"]), "lon": float(row["lon"]), "display_name": row.get("display_name", "")}
     except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
@@ -167,6 +169,52 @@ def norm_text(value: Any) -> str:
 def extract_year(text: str) -> int | None:
     years = [int(value) for value in re.findall(r"(?<!\d)(1[5-9]\d{2}|20\d{2})(?!\d)", text)]
     return min(years) if years else None
+
+
+async def yandex_image_search(image_bytes: bytes) -> list[dict[str, Any]]:
+    """Optional reverse-image search via Yandex Search API.
+
+    This function is deliberately disabled unless YANDEX_IMAGE_SEARCH_ENABLED=true
+    and both YANDEX_API_KEY and YANDEX_FOLDER_ID are configured.
+    """
+    if not (YANDEX_IMAGE_SEARCH_ENABLED and YANDEX_API_KEY and YANDEX_FOLDER_ID):
+        return []
+
+    headers = {"Api-Key": YANDEX_API_KEY, "Content-Type": "application/json"}
+    payload = {
+        "folderId": YANDEX_FOLDER_ID,
+        "data": base64.b64encode(image_bytes).decode("ascii"),
+        "page": "0",
+        "familyMode": "MODERATE",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            response = await client.post(YANDEX_IMAGE_URL, headers=headers, json=payload)
+        if response.status_code >= 400:
+            return []
+        body = response.json()
+        results: list[dict[str, Any]] = []
+        for item in body.get("images", [])[:20]:
+            if not isinstance(item, dict):
+                continue
+            image_url = norm_text(item.get("url"))
+            if not image_url:
+                continue
+            page_url = norm_text(item.get("pageUrl"))
+            title = norm_text(item.get("pageTitle")) or "Результат обратного поиска"
+            passage = norm_text(item.get("passage"))
+            results.append({
+                "image_url": image_url,
+                "page_url": page_url,
+                "title": title,
+                "description": passage,
+                "source": "Яндекс Картинки",
+                "kind": "reverse_image",
+                "year": extract_year(" ".join([title, passage, page_url])),
+            })
+        return results
+    except (httpx.HTTPError, ValueError, json.JSONDecodeError):
+        return []
 
 
 async def pastvu_search(lat: float, lon: float, year_to: int = 1999) -> list[dict[str, Any]]:
@@ -211,7 +259,7 @@ async def pastvu_search(lat: float, lon: float, year_to: int = 1999) -> list[dic
 
 async def wikimedia_search(queries: list[str], limit: int = 12) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
-    async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "AiWebCity/0.5"}) as client:
+    async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "AiWebCity/0.6"}) as client:
         for query in queries[:4]:
             params = {
                 "action": "query",
@@ -303,7 +351,8 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "token_configured": bool(TIMEWEB_TOKEN),
-        "paid_image_search": False,
+        "yandex_image_search_enabled": bool(YANDEX_IMAGE_SEARCH_ENABLED and YANDEX_API_KEY and YANDEX_FOLDER_ID),
+        "paid_image_search": bool(YANDEX_IMAGE_SEARCH_ENABLED),
         "vision_model": VISION_MODEL,
     }
 
@@ -343,7 +392,8 @@ async def identify(photo: UploadFile = File(...), address: str = Form(...), year
     ]
     queries = list(dict.fromkeys([f"{name} Новороссийск" for name in candidate_names] + queries))[:6]
 
-    similar = await wikimedia_search(queries or [f"Новороссийск {address}"], limit=12)
+    reverse_matches = await yandex_image_search(raw)
+    similar = reverse_matches + await wikimedia_search(queries or [f"Новороссийск {address}"], limit=12)
 
     historical: list[dict[str, Any]] = []
     if geo:
@@ -372,6 +422,12 @@ async def identify(photo: UploadFile = File(...), address: str = Form(...), year
             "description": "Геокодирование введённого адреса для пространственного поиска.",
         },
     ]
+    if YANDEX_IMAGE_SEARCH_ENABLED:
+        sources.append({
+            "name": "Яндекс Картинки",
+            "url": "https://yandex.ru/images/",
+            "description": "Обратный поиск по загруженной фотографии через API; активируется отдельно, чтобы не расходовать бюджет неожиданно.",
+        })
 
     return {
         "request_id": request_id,
@@ -382,7 +438,8 @@ async def identify(photo: UploadFile = File(...), address: str = Form(...), year
         "geocode": geo,
         "identification": identity_summary(analysis),
         "analysis": analysis,
-        "similar_images": dedupe_results(similar, 18),
+        "reverse_image_matches": dedupe_results(reverse_matches, 20),
+        "similar_images": dedupe_results(similar, 20),
         "historical_images": dedupe_results(historical, 18),
         "sources": sources,
         "generation": {
