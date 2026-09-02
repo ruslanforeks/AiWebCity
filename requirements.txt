@@ -4,6 +4,5 @@ httpx==0.28.1
 python-multipart==0.0.20
 Pillow>=12.0.0,<13
 lxml==6.0.3
-beautifulsoup4==4.13.4
 # PicImageSearch==3.12.11 is installed separately with --no-deps because its metadata
 # declares lxml<6, while Python 3.14 requires a newer lxml wheel on this server.

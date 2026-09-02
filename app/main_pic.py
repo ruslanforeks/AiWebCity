@@ -13,7 +13,7 @@ from .main import STATIC_DIR, MAX_UPLOAD_MB, TIMEWEB_TOKEN, extract_year, norm_t
 from .reverse_search import search as reverse_image_search
 from .visual_compare import extract_address_hints, verify_candidates
 
-app = FastAPI(title="AiWebCity", version="1.0.2-fullsize")
+app = FastAPI(title="AiWebCity", version="1.0.3-safe-originals")
 
 
 def _is_novorossiysk(text: str) -> bool:
@@ -155,8 +155,8 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "token_configured": bool(TIMEWEB_TOKEN),
-        "reverse_search": "Yandex full-size parser + PicImageSearch Google Lens",
-        "reverse_search_engines": ["Yandex Images (original URLs)", "Google Lens"],
+        "reverse_search": "PicImageSearch with Yandex originalImage extraction + Google Lens",
+        "reverse_search_engines": ["Yandex Images (original when available)", "Google Lens"],
         "identification_mode": "reverse-search-then-visual-verification",
         "city_scope": "Новороссийск",
         "photo_persistence": False,
