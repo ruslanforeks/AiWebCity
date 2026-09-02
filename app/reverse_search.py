@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from PicImageSearch import GoogleLens, Network
-
-from .yandex_fullsize import search_fullsize
+from PicImageSearch import GoogleLens, Network, Yandex
 
 REVERSE_SEARCH_TIMEOUT = 45.0
 REVERSE_SEARCH_RESULTS = 24
@@ -94,15 +93,67 @@ def image_identity(image_url: str) -> str:
     return normalized
 
 
-def item_to_dict(item: Any, source: str) -> dict[str, Any]:
+def _absolute_url(value: Any) -> str:
+    value = norm_text(value)
+    if value.startswith("//"):
+        return "https:" + value
+    return value
+
+
+def _extract_yandex_originals(response: Any) -> list[dict[str, Any]]:
+    """Extract originalImage URLs from PicImageSearch's raw Yandex response."""
+    try:
+        origin = getattr(response, "origin", None)
+        root = origin.find('div.Root[id^="ImagesApp-"]') if origin is not None else None
+        state = root.attr("data-state") if root is not None else None
+        if not state:
+            return []
+        data = json.loads(str(state))
+        sites = (((data or {}).get("initialState") or {}).get("cbirSites") or {}).get("sites") or []
+        if not isinstance(sites, list):
+            return []
+        results: list[dict[str, Any]] = []
+        for site in sites:
+            if not isinstance(site, dict):
+                continue
+            original = site.get("originalImage") if isinstance(site.get("originalImage"), dict) else {}
+            url = ""
+            for key in ("url", "originUrl", "origin_url", "src"):
+                url = _absolute_url(original.get(key))
+                if url:
+                    break
+            width = original.get("width")
+            height = original.get("height")
+            try:
+                width = int(width) if width is not None else None
+            except (TypeError, ValueError):
+                width = None
+            try:
+                height = int(height) if height is not None else None
+            except (TypeError, ValueError):
+                height = None
+            results.append({"url": url, "width": width, "height": height})
+        return results
+    except Exception:
+        return []
+
+
+def item_to_dict(
+    item: Any,
+    source: str,
+    *,
+    original_url: str = "",
+    original_size: str = "",
+) -> dict[str, Any]:
     title = norm_text(getattr(item, "title", ""))
     page_url = norm_text(getattr(item, "url", ""))
     thumb = norm_text(getattr(item, "thumbnail", ""))
     desc = norm_text(getattr(item, "content", ""))
     site = norm_text(getattr(item, "source", ""))
-    size = norm_text(getattr(item, "size", ""))
+    size = original_size or norm_text(getattr(item, "size", ""))
+    image_url = norm_text(original_url) or thumb
     return {
-        "image_url": thumb,
+        "image_url": image_url,
         "preview_url": thumb,
         "page_url": page_url,
         "title": title or f"Результат {source}",
@@ -111,7 +162,7 @@ def item_to_dict(item: Any, source: str) -> dict[str, Any]:
         "kind": "reverse_image",
         "site": site,
         "size": size,
-        "image_quality": "preview_fallback",
+        "image_quality": "original" if original_url else "preview_fallback",
     }
 
 
@@ -200,14 +251,47 @@ def dedupe(items: list[dict[str, Any]], limit: int = 60) -> list[dict[str, Any]]
 
 
 async def yandex_search(image_bytes: bytes) -> dict[str, Any]:
-    result = await search_fullsize(image_bytes, limit=REVERSE_SEARCH_RESULTS)
-    return {
-        "engine": "Yandex Images",
-        "ok": bool(result.get("ok")),
-        "results": result.get("results", []),
-        "search_url": result.get("search_url"),
-        "error": result.get("error"),
-    }
+    try:
+        async with Network(timeout=REVERSE_SEARCH_TIMEOUT) as client:
+            engine = Yandex(client=client, base_url="https://yandex.com")
+            response = await asyncio.wait_for(engine.search(file=image_bytes), timeout=REVERSE_SEARCH_TIMEOUT)
+        originals = _extract_yandex_originals(response)
+        raw_items = response.raw or []
+        results: list[dict[str, Any]] = []
+        for index, item in enumerate(raw_items[:REVERSE_SEARCH_RESULTS]):
+            original_url = ""
+            original_size = ""
+            if index < len(originals):
+                original_url = norm_text(originals[index].get("url"))
+                width = originals[index].get("width")
+                height = originals[index].get("height")
+                if width and height:
+                    original_size = f"{width}x{height}"
+            results.append(
+                item_to_dict(
+                    item,
+                    "Yandex Images",
+                    original_url=original_url,
+                    original_size=original_size,
+                )
+            )
+        return {
+            "engine": "Yandex Images",
+            "ok": True,
+            "results": results,
+            "search_url": norm_text(getattr(response, "url", "")) or None,
+            "error": None,
+            "original_urls": sum(1 for x in results if x.get("image_quality") == "original"),
+        }
+    except Exception as exc:
+        return {
+            "engine": "Yandex Images",
+            "ok": False,
+            "results": [],
+            "search_url": None,
+            "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+            "original_urls": 0,
+        }
 
 
 async def google_lens_search(image_bytes: bytes) -> dict[str, Any]:
