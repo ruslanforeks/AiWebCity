@@ -1,22 +1,16 @@
 from __future__ import annotations
 
+import io
+from typing import Any
+
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image
-import io
 
 from .main import (
-    STATIC_DIR,
-    MAX_UPLOAD_MB,
-    analyze_photo,
-    geocode_address,
-    extract_year,
-    norm_text,
-    wikimedia_search,
-    pastvu_search,
-    identity_summary,
-    build_pastphoto_link,
-    dedupe_results,
+    STATIC_DIR, MAX_UPLOAD_MB, TIMEWEB_TOKEN, analyze_photo, geocode_address,
+    extract_year, norm_text, wikimedia_search, pastvu_search,
+    identity_summary, build_pastphoto_link, dedupe_results,
 )
 from .reverse_search import search as reverse_image_search
 
@@ -29,10 +23,10 @@ async def index() -> FileResponse:
 
 
 @app.get("/api/health")
-async def health() -> dict:
+async def health() -> dict[str, Any]:
     return {
         "ok": True,
-        "token_configured": True,
+        "token_configured": bool(TIMEWEB_TOKEN),
         "reverse_search": "PicImageSearch",
         "reverse_search_engines": ["Yandex Images", "Google Lens"],
         "photo_persistence": False,
@@ -40,11 +34,7 @@ async def health() -> dict:
 
 
 @app.post("/api/identify")
-async def identify(
-    photo: UploadFile = File(...),
-    address: str = Form(...),
-    year: str = Form(""),
-) -> dict:
+async def identify(photo: UploadFile = File(...), address: str = Form(...), year: str = Form("")) -> dict[str, Any]:
     raw = await photo.read()
     if len(raw) > MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(413, f"Фото слишком большое. Максимум {MAX_UPLOAD_MB} МБ.")
@@ -60,7 +50,7 @@ async def identify(
     if not address:
         raise HTTPException(400, "Укажите адрес здания.")
 
-    # The uploaded photo remains in memory only; it is never written to disk.
+    # Privacy: the uploaded photo stays in memory and is never written to disk.
     analysis = await analyze_photo(raw, content_type, address, year.strip())
     geo = await geocode_address(address)
 
@@ -72,7 +62,6 @@ async def identify(
 
     reverse_result = await reverse_image_search(raw)
     reverse_items = reverse_result["results"]
-
     similar = dedupe_results(reverse_items + await wikimedia_search(queries or [f"Новороссийск {address}"], limit=12), 30)
 
     historical = []
@@ -84,13 +73,7 @@ async def identify(
             historical.append({**item, "kind": "historical"})
 
     engine_status = [
-        {
-            "name": e["engine"],
-            "ok": e["ok"],
-            "results": len(e["results"]),
-            "search_url": e.get("search_url"),
-            "error": e.get("error"),
-        }
+        {"name": e["engine"], "ok": e["ok"], "results": len(e["results"]), "search_url": e.get("search_url"), "error": e.get("error")}
         for e in reverse_result["engines"]
     ]
 
@@ -101,11 +84,7 @@ async def identify(
         "geocode": geo,
         "identification": identity_summary(analysis),
         "analysis": analysis,
-        "reverse_image_search": {
-            "provider": "PicImageSearch",
-            "engines": engine_status,
-            "results": reverse_items,
-        },
+        "reverse_image_search": {"provider": "PicImageSearch", "engines": engine_status, "results": reverse_items},
         "similar_images": similar,
         "historical_images": dedupe_results(historical, 24),
         "sources": [
@@ -118,7 +97,7 @@ async def identify(
         ],
         "privacy": {
             "server_storage": False,
-            "note": "AiWebCity не сохраняет загруженную фотографию на VPS. Для reverse image search фотография временно передаётся внешним поисковикам Yandex и Google через PicImageSearch. Их собственные правила обработки применяются отдельно.",
+            "note": "AiWebCity не сохраняет загруженное фото на VPS. Для reverse image search оно временно передаётся Yandex и Google через PicImageSearch; правила обработки этих внешних сервисов применяются отдельно.",
         },
         "generation": {"enabled": False},
     }
