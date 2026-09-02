@@ -13,7 +13,7 @@ from .main import STATIC_DIR, MAX_UPLOAD_MB, TIMEWEB_TOKEN, extract_year, norm_t
 from .reverse_search import search as reverse_image_search
 from .visual_compare import extract_address_hints, verify_candidates
 
-app = FastAPI(title="AiWebCity", version="1.0.1-evidence-first")
+app = FastAPI(title="AiWebCity", version="1.0.2-fullsize")
 
 
 def _is_novorossiysk(text: str) -> bool:
@@ -155,8 +155,8 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "token_configured": bool(TIMEWEB_TOKEN),
-        "reverse_search": "PicImageSearch",
-        "reverse_search_engines": ["Yandex Images", "Google Lens"],
+        "reverse_search": "Yandex full-size parser + PicImageSearch Google Lens",
+        "reverse_search_engines": ["Yandex Images (original URLs)", "Google Lens"],
         "identification_mode": "reverse-search-then-visual-verification",
         "city_scope": "Новороссийск",
         "photo_persistence": False,
@@ -233,7 +233,7 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
         "city": "Новороссийск",
         "place": place,
         "verification": {"visual_match": bool(place), "address_verified": bool(place)},
-        "candidate_images": [{"image_url": x.get("image_url")} for x in verifications[:12] if x.get("image_url")],
+        "candidate_images": [{"image_url": x.get("image_url"), "preview_url": x.get("preview_url")} for x in verifications[:12] if x.get("image_url")],
         "matched_images": matched_images,
         "historical_images": _dedupe_images(historical, 24),
         "message": (
