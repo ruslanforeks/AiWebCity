@@ -1,50 +1,32 @@
 from __future__ import annotations
 
 import base64
-import io
 import json
 import os
 import re
-import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
-from PIL import Image
+from fastapi import HTTPException
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
-
-DATA_DIR = BASE_DIR / "data"
-RESULTS_DIR = DATA_DIR / "results"
 STATIC_DIR = BASE_DIR / "static"
-for directory in (RESULTS_DIR, STATIC_DIR):
-    directory.mkdir(parents=True, exist_ok=True)
-
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
 TIMEWEB_API_BASE = os.getenv("TIMEWEB_API_BASE", "https://api.timeweb.ai/v1").rstrip("/")
 TIMEWEB_TOKEN = os.getenv("TIMEWEB_AI_TOKEN", "").strip()
 VISION_MODEL = os.getenv("TIMEWEB_VISION_MODEL", "openai/gpt-4.1-mini")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "12"))
-
-# Optional commercial reverse-image provider. Disabled by default.
-YANDEX_IMAGE_SEARCH_ENABLED = os.getenv("YANDEX_IMAGE_SEARCH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "").strip()
-YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID", "").strip()
-YANDEX_IMAGE_URL = "https://searchapi.api.cloud.yandex.net/v2/image/search_by_image"
-
 PASTVU_API_URL = "https://api.pastvu.com/api2"
 WIKIMEDIA_API_URL = "https://commons.wikimedia.org/w/api.php"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 PASTPHOTO_BASE = "https://pastphoto.ru/place/"
-
-app = FastAPI(title="AiWebCity", version="0.6.0")
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-app.mount("/results", StaticFiles(directory=str(RESULTS_DIR)), name="results")
+CITY_RU = "Новороссийск"
+CITY_EN = "Novorossiysk"
+OTHER_CITIES = {"геленджик", "gelendzhik", "анапа", "anapa", "краснодар", "krasnodar", "сочи", "sochi", "туапсе", "tuapse", "майкоп", "армавир", "керчь", "севастополь", "симферополь"}
 
 
 def require_token() -> None:
@@ -53,33 +35,34 @@ def require_token() -> None:
 
 
 def data_url(image_bytes: bytes, content_type: str) -> str:
-    encoded = base64.b64encode(image_bytes).decode("ascii")
-    return f"data:{content_type};base64,{encoded}"
+    return f"data:{content_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+
+
+def norm_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 def extract_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts: list[str] = []
+        out = []
         for item in content:
             if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                for key in ("text", "output_text"):
-                    if item.get(key):
-                        parts.append(str(item[key]))
-        return "".join(parts)
+                out.append(item)
+            elif isinstance(item, dict) and (item.get("text") or item.get("output_text")):
+                out.append(str(item.get("text") or item.get("output_text")))
+        return "".join(out)
     if isinstance(content, dict):
-        return str(content.get("text", content.get("output_text", "")))
+        return str(content.get("text") or content.get("output_text") or "")
     return ""
 
 
 def extract_json(text: str) -> dict[str, Any]:
     text = text.strip()
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
-    if fenced:
-        text = fenced.group(1)
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
+    if match:
+        text = match.group(1)
     try:
         value = json.loads(text)
         return value if isinstance(value, dict) else {}
@@ -107,50 +90,50 @@ async def timeweb_chat(messages: list[dict[str, Any]], model: str, *, temperatur
 
 async def analyze_photo(image_bytes: bytes, content_type: str, address: str, year: str) -> dict[str, Any]:
     prompt = f"""
-Ты — модуль компьютерного зрения городского проекта AiWebCity для Новороссийска.
-Твоя задача на этом этапе — идентификация объекта и подготовка поиска. НЕ реконструируй историю.
+Ты — компьютерное зрение проекта AiWebCity. Проект работает ТОЛЬКО по Новороссийску.
+Тебе дана фотография здания, нескольких зданий, улицы или городской сцены.
+Адрес пользователя — только слабая подсказка и может быть неправильным.
 
-Адрес пользователя: {address}
-Запрошенный исторический период: {year or 'не указан'}
+НЕ называй конкретное здание и НЕ придумывай адрес. Твоя задача — извлечь доказательства для внешнего поиска.
+visible_text — только реально читаемые слова и цифры на фото.
+address_clues — только реально видимые адресные признаки.
+landmark_clues — видимые ориентиры.
+visual_fingerprint — устойчивые признаки фасада/сцены.
+search_queries — запросы только из наблюдаемых признаков, без придуманных названий.
+Если объектов несколько, перечисли их признаки, не выбирая выдуманный главный объект.
 
-Правила:
-1. Отделяй видимые факты от предположений.
-2. Не придумывай даты строительства, архитектора, исторические названия или события.
-3. Предлагай кандидатов только при наличии оснований.
-4. Создай практичные поисковые запросы: название объекта, адрес, улица, ориентиры, историческое название только если оно видно или явно дано пользователем.
-5. Опиши визуальный отпечаток фасада, полезный для сопоставления снимков.
-6. Если точная идентификация невозможна, так и напиши.
+Адрес-подсказка: {address or 'не указан'}
+Период: {year or 'не указан'}
 
 Верни строго JSON:
 {{
-  "what_is_visible": "краткое описание того, что видно",
-  "object_type": "тип объекта",
-  "identity_candidates": [
-    {{"name": "кандидат", "reason": "обоснование", "confidence": "high|medium|low"}}
-  ],
-  "visual_fingerprint": ["этажность", "форма фасада", "окна", "углы/выступы", "материалы", "вывески", "другие уникальные признаки"],
-  "search_queries": ["до 6 конкретных запросов"],
-  "historical_claims": [],
-  "limits": "что нельзя установить только по фото"
+  "what_is_visible":"...",
+  "object_type":"building|street|intersection|landmark|multiple_buildings|unknown",
+  "visible_text":["..."],
+  "address_clues":[{{"text":"...","type":"street|house_number|sign|other","confidence":"high|medium"}}],
+  "landmark_clues":["..."],
+  "visual_fingerprint":["..."],
+  "search_queries":["до 6 запросов"],
+  "limits":"..."
 }}
 """
     body = await timeweb_chat([
-        {"role": "system", "content": "Отвечай на русском. Никогда не превращай догадки в исторические факты."},
-        {"role": "user", "content": [
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": data_url(image_bytes, content_type)}},
-        ]},
+        {"role": "system", "content": "Отвечай на русском. Не угадывай конкретные здания и адреса. Извлекай только наблюдаемые признаки."},
+        {"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": data_url(image_bytes, content_type)}}]},
     ], VISION_MODEL)
-    content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
-    return extract_json(extract_text(content))
+    result = extract_json(extract_text(body.get("choices", [{}])[0].get("message", {}).get("content", "")))
+    for key in ("visible_text", "address_clues", "landmark_clues", "visual_fingerprint", "search_queries"):
+        if not isinstance(result.get(key), list):
+            result[key] = []
+    return result
 
 
 async def geocode_address(address: str) -> dict[str, Any] | None:
-    headers = {"User-Agent": "AiWebCity/0.6 (+https://aiweb.su/)"}
-    params = {"q": address, "format": "jsonv2", "limit": 1, "addressdetails": 1}
+    if not norm_text(address):
+        return None
     try:
-        async with httpx.AsyncClient(timeout=15, headers=headers) as client:
-            response = await client.get(NOMINATIM_URL, params=params)
+        async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "AiWebCity/0.9 (+https://aiweb.su/)"}) as client:
+            response = await client.get(NOMINATIM_URL, params={"q": address, "format": "jsonv2", "limit": 1, "addressdetails": 1})
         if response.status_code >= 400:
             return None
         rows = response.json()
@@ -162,288 +145,176 @@ async def geocode_address(address: str) -> dict[str, Any] | None:
         return None
 
 
-def norm_text(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip()
-
-
 def extract_year(text: str) -> int | None:
-    years = [int(value) for value in re.findall(r"(?<!\d)(1[5-9]\d{2}|20\d{2})(?!\d)", text)]
+    years = [int(x) for x in re.findall(r"(?<!\d)(1[5-9]\d{2}|20\d{2})(?!\d)", text)]
     return min(years) if years else None
 
+_STREET_PREFIX = r"(?:ул(?:ица)?|проспект|просп\.?|пр-т|пер(?:еулок)?|наб(?:ережная)?|площадь|пл\.?|шоссе|бульвар|бул\.?|проезд|тупик|аллея)"
+_ADDRESS_RE = re.compile(rf"\b{_STREET_PREFIX}\.?\s+([\wА-Яа-яЁёA-Za-z][\wА-Яа-яЁёA-Za-z'’-]*(?:\s+[\wА-Яа-яЁёA-Za-z][\wА-Яа-яЁёA-Za-z'’-]*){{0,3}})\s*[,№\s]+\s*(\d{{1,4}}[А-Яа-яЁёA-Za-z]?(?:/\d{{1,4}})?)\b", re.I)
 
-async def yandex_image_search(image_bytes: bytes) -> list[dict[str, Any]]:
-    """Optional reverse-image search via Yandex Search API.
 
-    This function is deliberately disabled unless YANDEX_IMAGE_SEARCH_ENABLED=true
-    and both YANDEX_API_KEY and YANDEX_FOLDER_ID are configured.
-    """
-    if not (YANDEX_IMAGE_SEARCH_ENABLED and YANDEX_API_KEY and YANDEX_FOLDER_ID):
-        return []
+def normalize_street(value: str) -> str:
+    value = norm_text(value).lower().replace("ё", "е")
+    value = re.sub(rf"^{_STREET_PREFIX}\.?\s*", "", value, flags=re.I)
+    return value.strip(" ,.")
 
-    headers = {"Api-Key": YANDEX_API_KEY, "Content-Type": "application/json"}
-    payload = {
-        "folderId": YANDEX_FOLDER_ID,
-        "data": base64.b64encode(image_bytes).decode("ascii"),
-        "page": "0",
-        "familyMode": "MODERATE",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.post(YANDEX_IMAGE_URL, headers=headers, json=payload)
-        if response.status_code >= 400:
-            return []
-        body = response.json()
-        results: list[dict[str, Any]] = []
-        for item in body.get("images", [])[:20]:
-            if not isinstance(item, dict):
-                continue
-            image_url = norm_text(item.get("url"))
-            if not image_url:
-                continue
-            page_url = norm_text(item.get("pageUrl"))
-            title = norm_text(item.get("pageTitle")) or "Результат обратного поиска"
-            passage = norm_text(item.get("passage"))
-            results.append({
-                "image_url": image_url,
-                "page_url": page_url,
-                "title": title,
-                "description": passage,
-                "source": "Яндекс Картинки",
-                "kind": "reverse_image",
-                "year": extract_year(" ".join([title, passage, page_url])),
-            })
-        return results
-    except (httpx.HTTPError, ValueError, json.JSONDecodeError):
-        return []
+
+def normalize_house(value: str) -> str:
+    return norm_text(value).lower().replace("ё", "е").strip()
+
+
+def extract_addresses(text: str) -> list[dict[str, str]]:
+    out = []
+    for match in _ADDRESS_RE.finditer(norm_text(text).replace("ё", "е")):
+        street, house = normalize_street(match.group(1)), normalize_house(match.group(2))
+        if street and house:
+            out.append({"street": street, "house": house, "display": f"{street}, {house}"})
+    return out
+
+
+def parse_hint_address(address: str) -> tuple[str, str]:
+    found = extract_addresses(address)
+    if found:
+        return found[0]["street"], found[0]["house"]
+    clean = norm_text(address).lower().replace("ё", "е")
+    nums = re.findall(r"\b\d{1,4}[а-яa-z]?\b", clean)
+    return normalize_street(clean), nums[0] if nums else ""
+
+
+def build_identity_evidence(analysis: dict[str, Any], reverse_items: list[dict[str, Any]], user_address: str) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def add(street: str, house: str, source: str, text: str, points: int) -> None:
+        key = (normalize_street(street), normalize_house(house))
+        if not key[0] or not key[1]:
+            return
+        row = groups.setdefault(key, {"street": key[0], "house": key[1], "score": 0, "sources": [], "evidence": []})
+        row["score"] += points
+        if source not in row["sources"]:
+            row["sources"].append(source)
+        snippet = norm_text(text)
+        if snippet and snippet not in row["evidence"]:
+            row["evidence"].append(snippet[:280])
+
+    visible = " ".join(norm_text(v) for v in analysis.get("visible_text", []) if norm_text(v))
+    for clue in analysis.get("address_clues", []):
+        if isinstance(clue, dict):
+            clue_text = norm_text(clue.get("text"))
+            for match in extract_addresses(clue_text):
+                add(match["street"], match["house"], "photo", clue_text, 90)
+    for match in extract_addresses(visible):
+        add(match["street"], match["house"], "photo", visible, 80)
+
+    hint_street, hint_house = parse_hint_address(user_address)
+    if hint_street and hint_house:
+        add(hint_street, hint_house, "user_hint", user_address, 8)
+
+    for idx, item in enumerate(reverse_items):
+        text = " ".join(norm_text(item.get(k)) for k in ("title", "description", "site", "page_url", "image_url"))
+        lowered = text.lower().replace("ё", "е")
+        if any(city in lowered for city in OTHER_CITIES):
+            continue
+        for match in extract_addresses(text):
+            add(match["street"], match["house"], "reverse_search", text, max(18, 34 - idx))
+
+    rows = list(groups.values())
+    rows.sort(key=lambda r: (-r["score"], r["street"], r["house"]))
+    return rows[:8]
+
+
+async def geocode_novorossiysk_candidate(address: str) -> dict[str, Any] | None:
+    for query in (f"{address}, Новороссийск, Россия", f"{address}, Novorossiysk, Russia", address):
+        geo = await geocode_address(query)
+        if geo:
+            text = norm_text(geo.get("display_name")).lower().replace("ё", "е")
+            if CITY_RU.lower() in text or CITY_EN.lower() in text:
+                return geo
+    return None
+
+
+async def resolve_identity(analysis: dict[str, Any], reverse_items: list[dict[str, Any]], user_address: str) -> dict[str, Any]:
+    resolved = []
+    for candidate in build_identity_evidence(analysis, reverse_items, user_address):
+        display = f"{candidate['street']}, {candidate['house']}"
+        geo = await geocode_novorossiysk_candidate(display)
+        if not geo:
+            continue
+        sources = set(candidate["sources"])
+        score = candidate["score"] + (35 if "photo" in sources else 0) + min(30, max(0, len(sources) - 1) * 15)
+        strong = ("photo" in sources and "reverse_search" in sources) or ("reverse_search" in sources and len(sources) >= 2)
+        confidence = "high" if strong and score >= 100 else "medium" if strong or score >= 60 else "low"
+        resolved.append({"address": f"Новороссийск, {display}", "street": candidate["street"], "house": candidate["house"], "confidence": confidence, "score": score, "strong": strong, "sources": candidate["sources"], "evidence": candidate["evidence"][:4], "geocode": geo})
+    resolved.sort(key=lambda x: (not x["strong"], -x["score"]))
+    best = resolved[0] if resolved else None
+    return {"status": "identified" if best and best["strong"] else "uncertain", "best": best, "candidates": resolved[:5]}
 
 
 async def pastvu_search(lat: float, lon: float, year_to: int = 1999) -> list[dict[str, Any]]:
-    params_obj = {"geo": [lat, lon], "distance": 1500, "year2": year_to, "limit": 30}
-    params = {
-        "method": "photo.giveNearestPhotos",
-        "params": json.dumps(params_obj, ensure_ascii=False, separators=(",", ":")),
-    }
+    params = {"method": "photo.giveNearestPhotos", "params": json.dumps({"geo": [lat, lon], "distance": 400, "year2": year_to, "limit": 30}, separators=(",", ":"))}
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(PASTVU_API_URL, params=params)
         if response.status_code >= 400:
             return []
-        body = response.json()
-        rows = body.get("result", {}).get("photo", [])
-        results: list[dict[str, Any]] = []
-        for item in rows:
-            if not isinstance(item, dict):
+        out = []
+        for item in response.json().get("result", {}).get("photo", []):
+            fid = norm_text(item.get("file"))
+            if not fid:
                 continue
-            file_id = norm_text(item.get("file"))
-            if not file_id:
-                continue
-            cid = item.get("cid")
             try:
-                year_value = int(item.get("year")) if item.get("year") is not None else None
+                year = int(item.get("year")) if item.get("year") is not None else None
             except (TypeError, ValueError):
-                year_value = None
-            results.append({
-                "image_url": f"https://img.pastvu.com/d/{file_id}",
-                "page_url": f"https://pastvu.com/p/{cid}" if cid else "https://pastvu.com/",
-                "title": norm_text(item.get("title")) or "Историческая фотография",
-                "description": norm_text(item.get("desc") or item.get("description")),
-                "source": "PastVu",
-                "kind": "historical",
-                "year": year_value,
-                "distance_m": item.get("distance"),
-            })
-        return results
+                year = None
+            out.append({"image_url": f"https://img.pastvu.com/d/{fid}", "page_url": f"https://pastvu.com/p/{item.get('cid')}" if item.get("cid") else "https://pastvu.com/", "title": norm_text(item.get("title")) or "Историческая фотография", "description": norm_text(item.get("desc") or item.get("description")), "source": "PastVu", "kind": "historical", "year": year, "distance_m": item.get("distance")})
+        return out
     except (httpx.HTTPError, ValueError, json.JSONDecodeError):
         return []
 
 
 async def wikimedia_search(queries: list[str], limit: int = 12) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
-    async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "AiWebCity/0.6"}) as client:
-        for query in queries[:4]:
-            params = {
-                "action": "query",
-                "generator": "search",
-                "gsrnamespace": 6,
-                "gsrsearch": query,
-                "gsrlimit": 8,
-                "prop": "imageinfo",
-                "iiprop": "url|extmetadata",
-                "iiurlwidth": 900,
-                "format": "json",
-                "formatversion": 2,
-            }
+    merged = {}
+    async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "AiWebCity/0.9"}) as client:
+        for query in queries[:6]:
+            if not norm_text(query):
+                continue
+            params = {"action": "query", "generator": "search", "gsrnamespace": 6, "gsrsearch": query, "gsrlimit": 8, "prop": "imageinfo", "iiprop": "url|extmetadata", "iiurlwidth": 900, "format": "json", "formatversion": 2}
             try:
                 response = await client.get(WIKIMEDIA_API_URL, params=params)
                 if response.status_code >= 400:
                     continue
-                body = response.json()
-                for page in body.get("query", {}).get("pages", []):
-                    infos = page.get("imageinfo") or []
-                    if not infos:
-                        continue
-                    info = infos[0]
+                for page in response.json().get("query", {}).get("pages", []):
+                    info = (page.get("imageinfo") or [{}])[0]
                     image_url = norm_text(info.get("thumburl") or info.get("url"))
                     if not image_url:
                         continue
                     page_url = norm_text(page.get("canonicalurl"))
                     ext = info.get("extmetadata") or {}
                     title = norm_text(page.get("title"))
-                    description = re.sub(r"<[^>]+>", " ", norm_text((ext.get("ImageDescription") or {}).get("value")))
-                    key = page_url or image_url
-                    merged[key] = {
-                        "image_url": image_url,
-                        "page_url": page_url or "https://commons.wikimedia.org/",
-                        "title": title or "Wikimedia Commons",
-                        "description": description,
-                        "source": "Wikimedia Commons",
-                        "kind": "similar",
-                        "year": extract_year(" ".join([title, description])),
-                    }
+                    desc = re.sub(r"<[^>]+>", " ", norm_text((ext.get("ImageDescription") or {}).get("value")))
+                    merged[page_url or image_url] = {"image_url": image_url, "page_url": page_url or "https://commons.wikimedia.org/", "title": title or "Wikimedia Commons", "description": desc, "source": "Wikimedia Commons", "kind": "similar", "year": extract_year(f"{title} {desc}")}
             except (httpx.HTTPError, ValueError, json.JSONDecodeError):
                 continue
     return list(merged.values())[:limit]
 
 
 def build_pastphoto_link(address: str) -> str:
-    path = quote(address.replace(", Россия", "").strip(), safe="")
-    return f"{PASTPHOTO_BASE}{path}"
+    return f"{PASTPHOTO_BASE}{quote(norm_text(address).replace(', Россия', ''), safe='')}"
 
 
 def dedupe_results(items: list[dict[str, Any]], limit: int = 24) -> list[dict[str, Any]]:
-    seen: set[str] = set()
-    result: list[dict[str, Any]] = []
+    seen = set(); out = []
     for item in items:
         key = norm_text(item.get("image_url")) or norm_text(item.get("page_url"))
         if not key or key in seen:
             continue
-        seen.add(key)
-        result.append(item)
-        if len(result) >= limit:
+        seen.add(key); out.append(item)
+        if len(out) >= limit:
             break
-    return result
+    return out
 
 
-def identity_summary(analysis: dict[str, Any]) -> dict[str, Any]:
-    candidates = analysis.get("identity_candidates") if isinstance(analysis.get("identity_candidates"), list) else []
-    cleaned = []
-    for item in candidates[:5]:
-        if not isinstance(item, dict):
-            continue
-        confidence = str(item.get("confidence", "low")).lower()
-        if confidence not in {"high", "medium", "low"}:
-            confidence = "low"
-        cleaned.append({
-            "name": norm_text(item.get("name")),
-            "reason": norm_text(item.get("reason")),
-            "confidence": confidence,
-        })
-    return {"candidates": cleaned}
-
-
-@app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
-
-
-@app.get("/api/health")
-async def health() -> dict[str, Any]:
-    return {
-        "ok": True,
-        "token_configured": bool(TIMEWEB_TOKEN),
-        "yandex_image_search_enabled": bool(YANDEX_IMAGE_SEARCH_ENABLED and YANDEX_API_KEY and YANDEX_FOLDER_ID),
-        "paid_image_search": bool(YANDEX_IMAGE_SEARCH_ENABLED),
-        "vision_model": VISION_MODEL,
-    }
-
-
-@app.post("/api/identify")
-async def identify(photo: UploadFile = File(...), address: str = Form(...), year: str = Form("")) -> dict[str, Any]:
-    raw = await photo.read()
-    if len(raw) > MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(413, f"Фото слишком большое. Максимум {MAX_UPLOAD_MB} МБ.")
-    content_type = photo.content_type or "image/jpeg"
-    if content_type not in {"image/jpeg", "image/png", "image/webp"}:
-        raise HTTPException(400, "Поддерживаются JPG, PNG и WEBP.")
-    try:
-        Image.open(io.BytesIO(raw)).verify()
-    except Exception as exc:
-        raise HTTPException(400, "Не удалось прочитать изображение.") from exc
-
-    address = address.strip()
-    if not address:
-        raise HTTPException(400, "Укажите адрес здания.")
-
-    request_id = uuid.uuid4().hex
-    extension = Path(photo.filename or "photo.jpg").suffix.lower() or ".jpg"
-    modern_path = RESULTS_DIR / f"{request_id}_modern{extension}"
-    modern_path.write_bytes(raw)
-
-    analysis = await analyze_photo(raw, content_type, address, year.strip())
-    geo = await geocode_address(address)
-
-    raw_queries = analysis.get("search_queries") if isinstance(analysis.get("search_queries"), list) else []
-    queries = [norm_text(q) for q in raw_queries if norm_text(q)]
-    candidates = analysis.get("identity_candidates") if isinstance(analysis.get("identity_candidates"), list) else []
-    candidate_names = [
-        norm_text(item.get("name"))
-        for item in candidates
-        if isinstance(item, dict) and norm_text(item.get("name"))
-    ]
-    queries = list(dict.fromkeys([f"{name} Новороссийск" for name in candidate_names] + queries))[:6]
-
-    reverse_matches = await yandex_image_search(raw)
-    similar = reverse_matches + await wikimedia_search(queries or [f"Новороссийск {address}"], limit=12)
-
-    historical: list[dict[str, Any]] = []
-    if geo:
-        requested_year = extract_year(year)
-        historical.extend(await pastvu_search(geo["lat"], geo["lon"], requested_year or 1999))
-
-    sources = [
-        {
-            "name": "PastPhoto",
-            "url": build_pastphoto_link(address),
-            "description": "Исторические фотографии по месту; источник для дополнительной ручной проверки.",
-        },
-        {
-            "name": "PastVu",
-            "url": "https://pastvu.com/",
-            "description": "Исторические фотографии рядом с найденными координатами.",
-        },
-        {
-            "name": "Wikimedia Commons",
-            "url": "https://commons.wikimedia.org/",
-            "description": "Открытая база изображений и категорий.",
-        },
-        {
-            "name": "OpenStreetMap / Nominatim",
-            "url": "https://www.openstreetmap.org/",
-            "description": "Геокодирование введённого адреса для пространственного поиска.",
-        },
-    ]
-    if YANDEX_IMAGE_SEARCH_ENABLED:
-        sources.append({
-            "name": "Яндекс Картинки",
-            "url": "https://yandex.ru/images/",
-            "description": "Обратный поиск по загруженной фотографии через API; активируется отдельно, чтобы не расходовать бюджет неожиданно.",
-        })
-
-    return {
-        "request_id": request_id,
-        "status": "completed",
-        "modern_photo_url": f"/results/{modern_path.name}",
-        "address": address,
-        "year": year.strip(),
-        "geocode": geo,
-        "identification": identity_summary(analysis),
-        "analysis": analysis,
-        "reverse_image_matches": dedupe_results(reverse_matches, 20),
-        "similar_images": dedupe_results(similar, 20),
-        "historical_images": dedupe_results(historical, 18),
-        "sources": sources,
-        "generation": {
-            "enabled": False,
-            "reason": "Генерация изображений отключена на этапе идентификации и поиска источников.",
-        },
-    }
+def identity_summary(identity: dict[str, Any]) -> dict[str, Any]:
+    best = identity.get("best") if isinstance(identity, dict) else None
+    if not best:
+        return {"status": "uncertain", "address": None, "confidence": "low", "evidence": [], "sources": []}
+    return {"status": identity.get("status", "uncertain"), "address": best.get("address"), "confidence": best.get("confidence"), "evidence": best.get("evidence", []), "sources": best.get("sources", [])}
