@@ -1,66 +1,53 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <title>AiWebCity — Новороссийск сквозь время</title>
-  <meta name="description" content="Бесплатная визуальная реконструкция зданий Новороссийска по архивным источникам.">
-  <style>
-    :root{--bg:#f4f5f7;--card:#fff;--ink:#16181d;--muted:#6d7480;--line:#e5e8ed;--accent:#1f6feb;--accent2:#1558bd;--danger:#b42318;--ok:#067647;--shadow:0 18px 45px rgba(24,32,45,.08)}
-    *{box-sizing:border-box}body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
-    .wrap{max-width:980px;margin:0 auto;padding:24px 18px 64px}.hero{padding:32px 0 22px}.eyebrow{font-weight:700;color:var(--accent);font-size:13px;letter-spacing:.04em;text-transform:uppercase}.hero h1{font-size:clamp(36px,7vw,64px);line-height:.98;letter-spacing:-.04em;margin:12px 0}.hero p{max-width:680px;color:var(--muted);font-size:18px;line-height:1.55;margin:0}.card{background:var(--card);border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow);padding:22px;margin-top:18px}.grid{display:grid;grid-template-columns:1.2fr .8fr;gap:18px}.field{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}.field label{font-weight:700;font-size:14px}.field input,.field select{width:100%;border:1px solid var(--line);background:#fff;border-radius:14px;padding:14px 15px;font:inherit;outline:none}.field input:focus,.field select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(31,111,235,.12)}.upload{border:1.5px dashed #c8ced8;border-radius:18px;padding:24px;text-align:center;cursor:pointer;background:#fafbfd}.upload.drag{border-color:var(--accent);background:#f0f6ff}.upload input{display:none}.upload strong{display:block;margin-bottom:5px}.upload span{color:var(--muted);font-size:14px}.preview{margin-top:14px;display:none}.preview img{width:100%;max-height:420px;object-fit:contain;border-radius:16px;background:#eceff3}.actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px}.button{appearance:none;border:0;border-radius:14px;background:var(--accent);color:#fff;font:inherit;font-weight:800;padding:14px 18px;cursor:pointer}.button:hover{background:var(--accent2)}.button:disabled{opacity:.55;cursor:not-allowed}.status{min-height:22px;color:var(--muted);font-size:14px}.result{display:none}.result h2{margin-top:0}.result img{width:100%;border-radius:18px;background:#edf0f3}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 0}.pill{padding:12px;border-radius:14px;background:#f6f8fa;border:1px solid var(--line)}.pill small{display:block;color:var(--muted);margin-bottom:3px}.sources{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}.source{border:1px solid var(--line);border-radius:16px;padding:12px;background:#fff}.source img{aspect-ratio:4/3;object-fit:cover;border-radius:10px;background:#eee;margin-top:9px}.notice{padding:14px;border-radius:14px;background:#fff7e6;border:1px solid #f0d28a;color:#714d00}.error{color:var(--danger);padding:12px;border-radius:12px;background:#fff1f0}.success{color:var(--ok)}.footer{padding:26px 2px;color:var(--muted);font-size:13px;line-height:1.5}@media(max-width:760px){.grid{grid-template-columns:1fr}.meta,.sources{grid-template-columns:1fr}.card{padding:16px;border-radius:19px}.hero{padding-top:16px}.actions{align-items:stretch;flex-direction:column}.button{width:100%}}
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>AiWebCity — узнать здание Новороссийска</title>
+<meta name="description" content="Загрузите фото здания и адрес — AiWebCity ищет, что это за объект, похожие фотографии и исторические источники.">
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--ink:#17191d;--muted:#6d7480;--line:#e3e6eb;--accent:#1f6feb;--accent2:#1558bd;--soft:#f0f5ff;--gold:#fff7e6;--shadow:0 18px 48px rgba(24,32,45,.08)}
+*{box-sizing:border-box}body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
+.wrap{max-width:1100px;margin:0 auto;padding:24px 18px 70px}.hero{padding:34px 0 24px}.eyebrow{font-size:13px;font-weight:800;color:var(--accent);text-transform:uppercase;letter-spacing:.05em}.hero h1{font-size:clamp(38px,7vw,68px);line-height:.98;letter-spacing:-.045em;margin:11px 0 15px}.hero p{max-width:760px;color:var(--muted);font-size:18px;line-height:1.55;margin:0}.card{background:var(--card);border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow);padding:22px;margin-top:18px}.grid{display:grid;grid-template-columns:1.1fr .9fr;gap:18px}.field{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}.field label{font-weight:750;font-size:14px}.field input{width:100%;border:1px solid var(--line);background:#fff;border-radius:14px;padding:14px 15px;font:inherit;outline:none}.field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(31,111,235,.12)}.upload{border:1.5px dashed #c6ccd6;border-radius:18px;padding:28px;text-align:center;cursor:pointer;background:#fafbfd;min-height:210px;display:flex;align-items:center;justify-content:center;flex-direction:column}.upload.drag{border-color:var(--accent);background:#f0f6ff}.upload input{display:none}.upload strong{font-size:17px;margin-bottom:6px}.upload span{color:var(--muted);font-size:14px}.preview{margin-top:14px;display:none}.preview img{width:100%;max-height:390px;object-fit:contain;border-radius:16px;background:#eceff3}.actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px}.button{appearance:none;border:0;border-radius:14px;background:var(--accent);color:#fff;font:inherit;font-weight:800;padding:14px 19px;cursor:pointer}.button:hover{background:var(--accent2)}.button:disabled{opacity:.55;cursor:not-allowed}.status{min-height:22px;color:var(--muted);font-size:14px}.result{display:none}.result h2{margin-top:0}.result-head{display:grid;grid-template-columns:190px 1fr;gap:18px;align-items:start}.result-head img{width:190px;height:150px;object-fit:cover;border-radius:16px;background:#eee}.candidate{border:1px solid var(--line);border-radius:16px;padding:14px;margin-top:10px}.candidate strong{font-size:18px}.badge{display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;font-size:12px;font-weight:800;background:#f0f2f5;margin-left:7px}.high{background:#e9f8ef}.medium{background:#fff4d6}.low{background:#f2f3f5}.muted{color:var(--muted)}.section{margin-top:28px}.section h3{margin:0 0 12px}.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.source-card{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#fff}.source-card img{width:100%;aspect-ratio:4/3;object-fit:cover;background:#edf0f3}.source-content{padding:12px}.source-content strong{display:block}.source-content .small{font-size:13px;color:var(--muted);line-height:1.45;margin-top:5px}.source-content a{display:inline-block;margin-top:9px;color:var(--accent);text-decoration:none;font-weight:750;font-size:13px}.empty{padding:16px;border:1px dashed #cfd4dc;border-radius:14px;color:var(--muted)}.source-links{display:flex;flex-wrap:wrap;gap:10px}.source-link{display:block;border:1px solid var(--line);border-radius:14px;padding:12px 14px;color:inherit;text-decoration:none;background:#fff;min-width:210px}.notice{padding:14px;border-radius:14px;background:var(--gold);border:1px solid #efd38e;color:#714d00}.error{color:#b42318;padding:12px;border-radius:12px;background:#fff1f0}.footer{padding:26px 2px;color:var(--muted);font-size:13px;line-height:1.5}@media(max-width:800px){.grid,.result-head{grid-template-columns:1fr}.cards{grid-template-columns:1fr 1fr}.result-head img{width:100%;height:220px}.card{padding:16px;border-radius:19px}.actions{align-items:stretch;flex-direction:column}.button{width:100%}}@media(max-width:520px){.cards{grid-template-columns:1fr}}
+</style>
 </head>
 <body>
 <main class="wrap">
-  <section class="hero">
-    <div class="eyebrow">Бесплатный проект для Новороссийска</div>
-    <h1>Новороссийск<br>сквозь время</h1>
-    <p>Сфотографируйте здание, укажите адрес и исторический период. Сервис ищет архивные свидетельства и создаёт визуальную реконструкцию — не выдавая догадки за факты.</p>
-  </section>
-
-  <section class="card">
-    <form id="form">
-      <div class="grid">
-        <div>
-          <div class="field">
-            <label for="address">Адрес здания</label>
-            <input id="address" name="address" placeholder="Новороссийск, ул. Советов, 15" required>
-          </div>
-          <div class="field">
-            <label for="year">Год или период</label>
-            <input id="year" name="year" placeholder="Например, 1913 или 1900–1915">
-          </div>
-        </div>
-        <div>
-          <label class="upload" id="dropzone" for="photo">
-            <input id="photo" name="photo" type="file" accept="image/jpeg,image/png,image/webp" required>
-            <strong>Добавьте фотографию</strong>
-            <span>JPG, PNG или WEBP · до 12 МБ</span>
-          </label>
-          <div class="preview" id="preview"><img id="previewImg" alt="Предпросмотр"></div>
-        </div>
-      </div>
-      <div class="actions">
-        <div class="status" id="status">Источники важнее красоты: без достаточных доказательств реконструкция блокируется.</div>
-        <button class="button" id="submit" type="submit">Восстановить здание</button>
-      </div>
-    </form>
-  </section>
-
-  <section class="card result" id="result">
-    <h2>Результат</h2>
-    <div id="resultBody"></div>
-  </section>
-
-  <div class="footer">AiWebCity — экспериментальный бесплатный городской проект. Историческая реконструкция является визуальной интерпретацией архивных свидетельств и может содержать неопределённости.</div>
+<section class="hero">
+<div class="eyebrow">Бесплатный проект для Новороссийска</div>
+<h1>Что это за здание?</h1>
+<p>Загрузите фотографию и адрес. Сервис анализирует фасад, ищет визуальные совпадения в открытых источниках и поднимает исторические фотографии рядом с этим местом. Никакой генерации и выдуманных реконструкций на этом этапе.</p>
+</section>
+<section class="card">
+<form id="form">
+<div class="grid">
+<div>
+<div class="field"><label for="address">Адрес здания</label><input id="address" name="address" placeholder="Новороссийск, ул. Советов, 15" required></div>
+<div class="field"><label for="year">Исторический период <span class="muted">(необязательно)</span></label><input id="year" name="year" placeholder="Например, 1913 или 1900–1940"></div>
+<div class="notice">Главный принцип проекта: найденная фотография — это источник, а предположение ИИ — только предположение. Исторические факты без подтверждения не показываем как достоверные.</div>
+</div>
+<div>
+<label class="upload" id="dropzone" for="photo"><input id="photo" name="photo" type="file" accept="image/jpeg,image/png,image/webp" required><strong>Добавьте фотографию</strong><span>JPG, PNG или WEBP · до 12 МБ</span></label>
+<div class="preview" id="preview"><img id="previewImg" alt="Предпросмотр фотографии"></div>
+</div>
+</div>
+<div class="actions"><div class="status" id="status">Фото + адрес → идентификация → похожие изображения → исторические источники</div><button class="button" id="submit" type="submit">Найти здание</button></div>
+</form>
+</section>
+<section class="card result" id="result"><h2>Результаты поиска</h2><div id="resultBody"></div></section>
+<div class="footer">AiWebCity — экспериментальный бесплатный городской проект. Изображения принадлежат соответствующим правообладателям и показываются с указанием источника. Совпадение по фотографии не является окончательным историческим доказательством.</div>
 </main>
 <script>
-const form=document.getElementById('form');const photo=document.getElementById('photo');const dropzone=document.getElementById('dropzone');const preview=document.getElementById('preview');const previewImg=document.getElementById('previewImg');const statusEl=document.getElementById('status');const submit=document.getElementById('submit');const result=document.getElementById('result');const resultBody=document.getElementById('resultBody');
+const form=document.getElementById('form'),photo=document.getElementById('photo'),dropzone=document.getElementById('dropzone'),preview=document.getElementById('preview'),previewImg=document.getElementById('previewImg'),statusEl=document.getElementById('status'),submit=document.getElementById('submit'),result=document.getElementById('result'),resultBody=document.getElementById('resultBody');
 function setPreview(file){if(!file)return;const url=URL.createObjectURL(file);previewImg.src=url;preview.style.display='block'}
 photo.addEventListener('change',()=>setPreview(photo.files[0]));['dragenter','dragover'].forEach(e=>dropzone.addEventListener(e,ev=>{ev.preventDefault();dropzone.classList.add('drag')}));['dragleave','drop'].forEach(e=>dropzone.addEventListener(e,ev=>{ev.preventDefault();dropzone.classList.remove('drag')}));dropzone.addEventListener('drop',ev=>{const file=ev.dataTransfer.files[0];if(file){photo.files=ev.dataTransfer.files;setPreview(file)}});
-function esc(s){return String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\\':'&#92;','"':'&quot;'}[c]))}
-form.addEventListener('submit',async e=>{e.preventDefault();if(!photo.files[0])return;submit.disabled=true;statusEl.textContent='Анализируем фото и проверяем архивные источники…';result.style.display='none';resultBody.innerHTML='';const fd=new FormData(form);try{const r=await fetch('/api/reconstruct',{method:'POST',body:fd});const data=await r.json();if(!r.ok)throw new Error(data.detail||'Не удалось выполнить запрос');if(data.status==='insufficient_evidence'){statusEl.className='status';result.style.display='block';resultBody.innerHTML='<div class="notice"><strong>Реконструкция не создана.</strong><p>'+esc(data.message)+'</p></div><h3>Что увидел ИИ</h3><pre style="white-space:pre-wrap;line-height:1.5">'+esc(JSON.stringify(data.analysis,null,2))+'</pre>';return}if(data.status==='completed'){statusEl.className='status success';statusEl.textContent='Реконструкция готова';let sources='';for(const s of (data.archive_candidates||[])){sources+='<article class="source"><strong>'+esc(s.year||'Год не указан')+'</strong><br>'+esc(s.description||s.path)+'<div style="color:#6d7480;font-size:13px;margin-top:5px">'+esc(s.source||'Источник не указан')+'</div><img src="/archive/'+encodeURIComponent(s.path)+'" alt="Архивный источник" onerror="this.style.display=\'none\'"> </article>'}result.style.display='block';resultBody.innerHTML='<img src="'+esc(data.reconstruction_url)+'" alt="Историческая реконструкция"><div class="meta"><div class="pill"><small>Адрес</small>'+esc(fd.get('address'))+'</div><div class="pill"><small>Период</small>'+esc(fd.get('year')||'ближайший подтверждённый')+'</div><div class="pill"><small>Источников</small>'+((data.archive_candidates||[]).length)+'</div></div><p>'+esc(data.message)+'</p><h3>Архивные источники</h3><div class="sources">'+sources+'</div>';return}throw new Error(data.message||'Недостаточно данных')}catch(err){statusEl.className='status error';statusEl.textContent=err.message||'Ошибка'}finally{submit.disabled=false}});
+function esc(s){return String(s??'').replace(/[&<>\\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\\':'&#92;','"':'&quot;'}[c]))}
+function confidenceLabel(v){return v==='high'?'Высокая вероятность':v==='medium'?'Средняя вероятность':'Низкая вероятность'}
+function renderCards(items,emptyText){if(!items||!items.length)return '<div class="empty">'+esc(emptyText)+'</div>';return '<div class="cards">'+items.map(item=>'<article class="source-card"><img loading="lazy" src="'+esc(item.image_url)+'" alt="" onerror="this.style.display=\'none\'"><div class="source-content"><strong>'+esc(item.title||item.source||'Источник')+'</strong><div class="small">'+esc(item.source||'')+(item.year?' · '+esc(item.year):'')+(item.description?' — '+esc(item.description):'')+'</div>'+(item.page_url?'<a href="'+esc(item.page_url)+'" target="_blank" rel="noopener">Открыть источник ↗</a>':'')+'</div></article>').join('')+'</div>'}
+form.addEventListener('submit',async e=>{e.preventDefault();if(!photo.files[0])return;submit.disabled=true;statusEl.className='status';statusEl.textContent='Анализируем фотографию, проверяем адрес и ищем открытые источники…';result.style.display='none';resultBody.innerHTML='';try{const r=await fetch('/api/identify',{method:'POST',body:new FormData(form)});const data=await r.json();if(!r.ok)throw new Error(data.detail||'Не удалось выполнить запрос');const id=data.identification?.candidates||[];let candidates=id.map(c=>'<div class="candidate"><strong>'+esc(c.name||'Неизвестный объект')+'</strong><span class="badge '+esc(c.confidence)+'">'+confidenceLabel(c.confidence)+'</span><div class="small muted" style="margin-top:6px">'+esc(c.reason||'')+'</div></div>').join('');if(!candidates)candidates='<div class="empty">Точного кандидата пока нет. Это нормально: поиск продолжит помогать через источники.</div>';
+let a=data.analysis||{};let fingerprint=(a.visual_fingerprint||[]).map(x=>'<span class="badge">'+esc(x)+'</span>').join(' ');let sources=(data.sources||[]).map(s=>'<a class="source-link" href="'+esc(s.url)+'" target="_blank" rel="noopener"><strong>'+esc(s.name)+'</strong><div class="muted" style="font-size:13px;margin-top:4px">'+esc(s.description||'')+'</div></a>').join('');
+resultBody.innerHTML='<div class="result-head"><img src="'+esc(data.modern_photo_url)+'" alt="Загруженное фото"><div><div class="muted">Адрес</div><strong style="font-size:22px">'+esc(data.address)+'</strong>'+(data.geocode?'<div class="muted" style="margin-top:7px">Координаты найдены: '+Number(data.geocode.lat).toFixed(5)+', '+Number(data.geocode.lon).toFixed(5)+'</div>':'<div class="notice" style="margin-top:10px">Адрес не удалось автоматически превратить в координаты. Источники по текстовому поиску всё равно обработаны.</div>')+'<div class="section"><strong>Что увидел AI</strong><div style="margin-top:7px">'+esc(a.what_is_visible||'Описание не получено')+'</div></div></div></div><div class="section"><h3>Вероятно, это…</h3>'+candidates+'</div><div class="section"><h3>Визуальный отпечаток здания</h3><div>'+fingerprint+'</div></div><div class="section"><h3>Похожие современные фотографии</h3>'+renderCards(data.similar_images,'Похожих изображений пока не найдено. Подключите Яндекс Search API для усиления обратного поиска.')+'</div><div class="section"><h3>Исторические фотографии</h3>'+renderCards(data.historical_images,'Исторические снимки рядом с указанным адресом пока не найдены.')+'</div><div class="section"><h3>Открытые источники</h3><div class="source-links">'+sources+'</div></div><div class="section"><div class="notice">Генерация изображений сейчас отключена. Следующий этап будет добавлен только после того, как мы научим сервис надёжно идентифицировать объект и собирать доказательства.</div></div>';
+result.style.display='block';statusEl.textContent='Поиск завершён';}catch(err){statusEl.className='status error';statusEl.textContent=err.message||'Ошибка'}finally{submit.disabled=false}});
 </script>
 </body>
 </html>
