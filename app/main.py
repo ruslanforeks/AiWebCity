@@ -10,12 +10,15 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
 DATA_DIR = BASE_DIR / "data"
 ARCHIVE_DIR = DATA_DIR / "archive"
 RESULTS_DIR = DATA_DIR / "results"
@@ -30,7 +33,7 @@ IMAGE_MODEL = os.getenv("TIMEWEB_IMAGE_MODEL", "openai/gpt-image-2")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "12"))
 MAX_ARCHIVE_IMAGES = int(os.getenv("MAX_ARCHIVE_IMAGES", "4"))
 
-app = FastAPI(title="AiWebCity", version="0.3.0")
+app = FastAPI(title="AiWebCity", version="0.3.1")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.mount("/archive", StaticFiles(directory=str(ARCHIVE_DIR)), name="archive")
 app.mount("/results", StaticFiles(directory=str(RESULTS_DIR)), name="results")
@@ -75,14 +78,12 @@ def extract_json(text: str) -> dict[str, Any]:
     if fenced:
         text = fenced.group(1)
     try:
-        value = json.loads(text)
-        return value if isinstance(value, dict) else {"raw": text}
+        return json.loads(text)
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, re.S)
         if match:
             try:
-                value = json.loads(match.group(0))
-                return value if isinstance(value, dict) else {"raw": text}
+                return json.loads(match.group(0))
             except json.JSONDecodeError:
                 pass
     return {"raw": text}
@@ -124,10 +125,7 @@ async def analyze_photo(image_bytes: bytes, content_type: str, address: str, yea
             {"type": "image_url", "image_url": {"url": data_url(image_bytes, content_type)}},
         ]},
     ], VISION_MODEL)
-    choices = body.get("choices") or []
-    if not choices:
-        raise HTTPException(502, f"Timeweb AI вернул ответ без choices: {body}")
-    content = choices[0].get("message", {}).get("content", "")
+    content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
     return extract_json(extract_text(content))
 
 
@@ -142,42 +140,23 @@ def load_archive_manifest() -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
-def safe_archive_path(relative: str) -> Path | None:
-    path = Path(relative)
-    if path.is_absolute() or ".." in path.parts:
-        return None
-    candidate = (ARCHIVE_DIR / path).resolve()
-    try:
-        candidate.relative_to(ARCHIVE_DIR.resolve())
-    except ValueError:
-        return None
-    if candidate.suffix.lower() not in ALLOWED_EXTENSIONS or not candidate.is_file():
-        return None
-    return candidate
-
-
 def find_archive_candidates(address: str, year: str, limit: int = 8) -> list[dict[str, Any]]:
     manifest = load_archive_manifest()
     tokens = [t.lower() for t in re.findall(r"[а-яёa-z0-9]+", f"{address} {year}") if len(t) > 2]
     rows: list[tuple[int, dict[str, Any]]] = []
     for item in manifest:
-        relative = str(item.get("path", ""))
-        path = safe_archive_path(relative)
-        if path is None:
+        path = Path(str(item.get("path", "")))
+        if path.is_absolute() or not path.name:
+            continue
+        abs_path = ARCHIVE_DIR / path
+        if not abs_path.exists() or abs_path.suffix.lower() not in ALLOWED_EXTENSIONS:
             continue
         haystack = " ".join(str(item.get(key, "")) for key in ("path", "address", "year", "description", "source")).lower()
         score = sum(3 for token in tokens if token in haystack)
         item_copy = dict(item)
-        item_copy["path"] = relative
+        item_copy["path"] = str(path)
         item_copy["score"] = score
         rows.append((score, item_copy))
-
-    # Even when metadata has no exact match, return a small deterministic sample.
-    if not rows:
-        for path in sorted(ARCHIVE_DIR.rglob("*")):
-            if path.suffix.lower() in ALLOWED_EXTENSIONS and path.is_file():
-                rows.append((0, {"path": str(path.relative_to(ARCHIVE_DIR)), "score": 0}))
-
     rows.sort(key=lambda x: (-x[0], str(x[1].get("path", ""))))
     return [item for _, item in rows[:limit]]
 
@@ -185,9 +164,8 @@ def find_archive_candidates(address: str, year: str, limit: int = 8) -> list[dic
 def evidence_payload(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     for candidate in candidates[:MAX_ARCHIVE_IMAGES]:
-        path = safe_archive_path(str(candidate["path"]))
-        if path is None:
-            continue
+        relative = Path(candidate["path"])
+        path = ARCHIVE_DIR / relative
         try:
             raw = path.read_bytes()
         except OSError:
@@ -197,58 +175,58 @@ def evidence_payload(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def parse_generated_image(body: dict[str, Any]) -> bytes | None:
-    def decode_value(value: Any) -> bytes | None:
-        if isinstance(value, dict):
-            raw = value.get("b64_json") or value.get("base64") or value.get("data")
-            if isinstance(raw, str):
-                if raw.startswith("data:image"):
-                    raw = raw.split(",", 1)[1]
-                try:
-                    return base64.b64decode(raw)
-                except Exception:
-                    return None
-        if isinstance(value, str) and value.startswith("data:image"):
-            try:
-                return base64.b64decode(value.split(",", 1)[1])
-            except Exception:
-                return None
-        return None
-
-    for choice in body.get("choices") or []:
+    choices = body.get("choices") or []
+    for choice in choices:
         message = choice.get("message", {}) if isinstance(choice, dict) else {}
         for key in ("images", "image"):
             value = message.get(key)
             values = value if isinstance(value, list) else [value]
             for item in values:
-                decoded = decode_value(item)
-                if decoded:
-                    return decoded
+                if isinstance(item, dict):
+                    raw = item.get("b64_json") or item.get("base64")
+                    url = item.get("url")
+                    if raw:
+                        return base64.b64decode(raw)
+                    if url:
+                        return None
+                elif isinstance(item, str) and item.startswith("data:image"):
+                    return base64.b64decode(item.split(",", 1)[1])
         content = message.get("content")
-        parts = content if isinstance(content, list) else [content]
-        for part in parts:
-            if isinstance(part, dict):
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
                 if part.get("type") in {"image", "image_url", "output_image"}:
-                    for key in ("image", "image_url", "data"):
-                        decoded = decode_value(part.get(key))
-                        if decoded:
-                            return decoded
+                    image = part.get("image") or part.get("image_url") or part.get("data")
+                    if isinstance(image, dict):
+                        raw = image.get("b64_json") or image.get("base64")
+                        url = image.get("url")
+                        if raw:
+                            return base64.b64decode(raw)
+                        if url:
+                            return None
+                    if isinstance(image, str) and image.startswith("data:image"):
+                        return base64.b64decode(image.split(",", 1)[1])
     return None
 
 
 async def generate_reconstruction(modern_bytes: bytes, modern_type: str, address: str, year: str, analysis: dict[str, Any], candidates: list[dict[str, Any]]) -> bytes:
     evidence = evidence_payload(candidates)
     if not evidence:
-        raise HTTPException(422, "Нет читаемых архивных изображений. Реконструкция заблокирована до появления источников.")
+        raise HTTPException(422, "Нет архивных изображений. Реконструкция заблокирована до появления источников.")
 
     content: list[dict[str, Any]] = [{"type": "text", "text": f"""
-Создай реалистичную историческую реконструкцию здания в Новороссийске.
+Создай историческую реконструкцию здания в Новороссийске.
 Адрес: {address}
 Период: {year or 'ближайший подтвержденный период'}
 
-Сначала рассмотрите современное фото как геометрический reference. Сохрани ракурс, перспективу, этажность, общую форму здания, положение окон и дверей.
-Далее используй архивные фотографии как доказательства исторического состояния. Меняй только признаки, которые действительно подтверждаются источниками.
-Не придумывай башни, этажи, окна, двери, декор, вывески или другие элементы. Если признак не подтвержден, не добавляй его.
-Не делай изображение в стиле картины или AI-art: результат должен выглядеть как настоящая фотография соответствующего исторического времени.
+Современная фотография — главный геометрический reference: сохрани ракурс, перспективу, этажность, форму здания, расположение окон и дверей.
+Архивные изображения ниже — ДОКАЗАТЕЛЬСТВА, а не декоративные референсы. Используй только элементы, которые действительно подтверждаются архивными материалами.
+Если деталь не подтверждена — НЕ придумывай ее. Лучше нейтральная/неопределенная деталь, чем ложная историческая уверенность.
+Не добавляй фантазийные башни, окна, этажи, вывески, людей или архитектурные элементы.
+Сохрани реалистичную фотографическую оптику и естественное освещение соответствующего исторического периода.
+
+Результат должен выглядеть как достоверная визуальная реконструкция, а не AI-art.
 
 Анализ современного фото:
 {json.dumps(analysis, ensure_ascii=False)}
@@ -256,14 +234,14 @@ async def generate_reconstruction(modern_bytes: bytes, modern_type: str, address
 
     for item in evidence:
         meta = item["meta"]
-        content.append({"type": "text", "text": f"АРХИВНЫЙ ИСТОЧНИК: год={meta.get('year', 'не указан')}; адрес={meta.get('address', '')}; описание={meta.get('description', '')}; источник={meta.get('source', '')}"})
+        content.append({"type": "text", "text": f"Источник: {meta.get('source', 'не указан')}; год: {meta.get('year', 'не указан')}; описание: {meta.get('description', '')}"})
         content.append({"type": "image_url", "image_url": {"url": item["image"]}})
 
-    body = await timeweb_chat([{ "role": "user", "content": content }], IMAGE_MODEL, temperature=0.3)
+    body = await timeweb_chat([{ "role": "user", "content": content }], IMAGE_MODEL, temperature=0.4)
     image_bytes = parse_generated_image(body)
     if image_bytes:
         return image_bytes
-    raise HTTPException(502, "Модель генерации не вернула изображение. Укажите точный image-model ID из Timeweb AI Gateway в TIMEWEB_IMAGE_MODEL.")
+    raise HTTPException(502, "Модель генерации ответила без изображения. Проверьте название image-модели в .env и поддержку генерации через выбранный Timeweb API.")
 
 
 @app.get("/")
@@ -306,8 +284,6 @@ async def reconstruct(
 
     request_id = uuid.uuid4().hex
     extension = Path(photo.filename or "photo.jpg").suffix.lower() or ".jpg"
-    if extension not in ALLOWED_EXTENSIONS:
-        extension = ".jpg"
     modern_path = RESULTS_DIR / f"{request_id}_modern{extension}"
     modern_path.write_bytes(raw)
 
@@ -317,7 +293,7 @@ async def reconstruct(
         return {
             "request_id": request_id,
             "status": "insufficient_evidence",
-            "message": "В архиве пока нет изображений. Реконструкция не создаётся, потому что сервис не должен выдавать выдумку за историю.",
+            "message": "В архиве пока нет подходящих источников. Реконструкция не создана, потому что проект не должен выдавать выдумку за историю.",
             "analysis": analysis,
             "archive_candidates": [],
             "modern_photo_url": f"/results/{modern_path.name}",
@@ -330,9 +306,9 @@ async def reconstruct(
     return {
         "request_id": request_id,
         "status": "completed",
-        "reconstruction_url": f"/results/{result_path.name}",
-        "modern_photo_url": f"/results/{modern_path.name}",
+        "message": "Реконструкция создана на основе найденных архивных источников.",
         "analysis": analysis,
         "archive_candidates": candidates,
-        "message": "Готово. Архивные источники использованы как evidence для реконструкции.",
+        "modern_photo_url": f"/results/{modern_path.name}",
+        "reconstruction_url": f"/results/{result_path.name}",
     }
