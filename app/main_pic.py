@@ -19,7 +19,7 @@ app = FastAPI(title="AiWebCity", version="0.7.0-picimage")
 
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index_pic.html")
 
 
 @app.get("/api/health")
