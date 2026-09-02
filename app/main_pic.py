@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 from typing import Any
 
 import httpx
@@ -12,7 +13,7 @@ from .main import STATIC_DIR, MAX_UPLOAD_MB, TIMEWEB_TOKEN, extract_year, norm_t
 from .reverse_search import search as reverse_image_search
 from .visual_compare import extract_address_hints, verify_candidates
 
-app = FastAPI(title="AiWebCity", version="1.0.0-evidence-first")
+app = FastAPI(title="AiWebCity", version="1.0.1-evidence-first")
 
 
 def _is_novorossiysk(text: str) -> bool:
@@ -20,33 +21,51 @@ def _is_novorossiysk(text: str) -> bool:
     return "новороссийск" in value or "novorossiysk" in value
 
 
-async def _geocode_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
-    hints = extract_address_hints(candidate)
-    title = norm_text(candidate.get("title"))
-    description = norm_text(candidate.get("description"))
-    site = norm_text(candidate.get("site"))
-    source_text = norm_text(" ".join([title, description, site]))
-    if _is_novorossiysk(source_text):
-        hints.append(source_text[:160])
-    if title:
-        hints.append(title[:160])
+def _candidate_source_text(candidate: dict[str, Any]) -> str:
+    return norm_text(" ".join([
+        norm_text(candidate.get("title")),
+        norm_text(candidate.get("description")),
+        norm_text(candidate.get("site")),
+        norm_text(candidate.get("page_url")),
+    ]))
 
-    queries: list[str] = []
+
+def _has_street_or_address(text: str) -> bool:
+    value = text.lower().replace("ё", "е")
+    return bool(re.search(r"(?:ул\.?|улица|просп\.?|проспект|пер\.?|переулок|шоссе|наб\.?|набережная)\s+[а-яa-z0-9 .-]+", value))
+
+
+async def _geocode_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    source_text = _candidate_source_text(candidate)
+    if any(city in source_text.lower().replace("ё", "е") for city in {
+        "геленджик", "геледжик", "анапа", "краснодар", "сочи", "туапсе",
+        "севастополь", "симферополь", "ростов-на-дону", "майкоп", "армавир", "керчь",
+    }):
+        return None
+
+    hints = extract_address_hints(candidate)
+    if not hints and not (_is_novorossiysk(source_text) and _has_street_or_address(source_text)):
+        return None
+    if not hints:
+        hints = [source_text[:180]]
+
     seen: set[str] = set()
+    queries: list[str] = []
     for hint in hints:
         hint = norm_text(hint)
         if hint and hint not in seen:
             seen.add(hint)
             queries.append(hint)
-    if not queries:
-        return None
 
     headers = {"User-Agent": "AiWebCity/1.0 (+https://aiweb.su/)"}
     async with httpx.AsyncClient(timeout=15, headers=headers) as client:
         for query in queries[:5]:
             q = query if _is_novorossiysk(query) else f"{query}, Новороссийск, Россия"
             try:
-                response = await client.get("https://nominatim.openstreetmap.org/search", params={"q": q, "format": "jsonv2", "limit": 3, "addressdetails": 1})
+                response = await client.get(
+                    "https://nominatim.openstreetmap.org/search",
+                    params={"q": q, "format": "jsonv2", "limit": 5, "addressdetails": 1},
+                )
                 if response.status_code >= 400:
                     continue
                 rows = response.json()
@@ -58,6 +77,7 @@ async def _geocode_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None
                     continue
                 addr = row.get("address") if isinstance(row.get("address"), dict) else {}
                 street = norm_text(addr.get("road") or addr.get("pedestrian") or addr.get("residential"))
+                house = norm_text(addr.get("house_number"))
                 if not street:
                     continue
                 return {
@@ -65,10 +85,10 @@ async def _geocode_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None
                     "lon": float(row["lon"]),
                     "display_name": display,
                     "street": street,
-                    "house_number": norm_text(addr.get("house_number")),
+                    "house_number": house,
                     "city": norm_text(addr.get("city") or addr.get("town") or "Новороссийск"),
                     "address_verified": True,
-                    "house_number_verified": bool(norm_text(addr.get("house_number"))),
+                    "house_number_verified": bool(house),
                 }
     return None
 
@@ -91,13 +111,20 @@ async def _verify_candidates(original: bytes, content_type: str, candidates: lis
     for item in visual:
         visual_ok = bool(item.get("same_place")) and float(item.get("confidence", 0.0)) >= 0.72
         location = await _geocode_candidate(item) if visual_ok else None
-        enriched_item = dict(item)
-        enriched_item["visual_verified"] = visual_ok
-        enriched_item["address_verified"] = bool(location)
-        enriched_item["location"] = location
-        enriched_item["resolved_address"] = _pretty_address(location)
-        enriched.append(enriched_item)
-    return sorted(enriched, key=lambda x: (bool(x.get("visual_verified")) and bool(x.get("address_verified")), float(x.get("confidence", 0.0))), reverse=True)
+        copy = dict(item)
+        copy["visual_verified"] = visual_ok
+        copy["address_verified"] = bool(location)
+        copy["location"] = location
+        copy["resolved_address"] = _pretty_address(location)
+        enriched.append(copy)
+    return sorted(
+        enriched,
+        key=lambda x: (
+            bool(x.get("visual_verified")) and bool(x.get("address_verified")),
+            float(x.get("confidence", 0.0)),
+        ),
+        reverse=True,
+    )
 
 
 def _dedupe_images(items: list[dict[str, Any]], limit: int = 24) -> list[dict[str, Any]]:
@@ -108,7 +135,11 @@ def _dedupe_images(items: list[dict[str, Any]], limit: int = 24) -> list[dict[st
         if not url or url in seen:
             continue
         seen.add(url)
-        result.append({k: v for k, v in item.items() if k in {"image_url", "page_url", "year", "source", "kind", "distance_m"}})
+        result.append({
+            key: item.get(key)
+            for key in ("image_url", "page_url", "year", "source", "kind", "distance_m")
+            if item.get(key) is not None
+        })
         if len(result) >= limit:
             break
     return result
@@ -180,10 +211,7 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
             "confidence": float(best.get("confidence", 0.0)),
         }
         matched_images = [
-            {
-                "image_url": x.get("image_url"),
-                "confidence": float(x.get("confidence", 0.0)),
-            }
+            {"image_url": x.get("image_url"), "confidence": float(x.get("confidence", 0.0))}
             for x in accepted[:8]
             if x.get("image_url")
         ]
@@ -196,7 +224,7 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
             f"Новороссийск {norm_text(place.get('address'))}",
             f"Новороссийск {norm_text(place.get('street'))}",
         ]
-        queries = list(dict.fromkeys(x for x in queries if x.strip() != "Новороссийск"))
+        queries = list(dict.fromkeys(q for q in queries if q.strip() != "Новороссийск"))
         if queries:
             historical.extend(await wikimedia_search(queries, limit=12))
 
