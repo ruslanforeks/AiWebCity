@@ -5,7 +5,9 @@ import re
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from PicImageSearch import GoogleLens, Network, Yandex
+from PicImageSearch import GoogleLens, Network
+
+from .yandex_fullsize import search_fullsize
 
 REVERSE_SEARCH_TIMEOUT = 45.0
 REVERSE_SEARCH_RESULTS = 24
@@ -101,6 +103,7 @@ def item_to_dict(item: Any, source: str) -> dict[str, Any]:
     size = norm_text(getattr(item, "size", ""))
     return {
         "image_url": thumb,
+        "preview_url": thumb,
         "page_url": page_url,
         "title": title or f"Результат {source}",
         "description": desc,
@@ -108,6 +111,7 @@ def item_to_dict(item: Any, source: str) -> dict[str, Any]:
         "kind": "reverse_image",
         "site": site,
         "size": size,
+        "image_quality": "preview_fallback",
     }
 
 
@@ -149,7 +153,6 @@ def rank_novorossiysk(items: list[dict[str, Any]], address: str, limit: int = FI
         if any(term in text for term in NOVOROSSIYSK_TERMS):
             score += 40
 
-        # User address is a weak prior only. Visual verification has the final say.
         if address_lower and address_lower in text:
             score += 25
         matched_street = sum(1 for token in street_tokens if token in text)
@@ -197,25 +200,14 @@ def dedupe(items: list[dict[str, Any]], limit: int = 60) -> list[dict[str, Any]]
 
 
 async def yandex_search(image_bytes: bytes) -> dict[str, Any]:
-    try:
-        async with Network(timeout=REVERSE_SEARCH_TIMEOUT) as client:
-            engine = Yandex(client=client, base_url="https://yandex.com")
-            response = await asyncio.wait_for(engine.search(file=image_bytes), timeout=REVERSE_SEARCH_TIMEOUT)
-        return {
-            "engine": "Yandex Images",
-            "ok": True,
-            "results": [item_to_dict(i, "Yandex Images") for i in (response.raw or [])][:REVERSE_SEARCH_RESULTS],
-            "search_url": norm_text(getattr(response, "url", "")) or None,
-            "error": None,
-        }
-    except Exception as exc:
-        return {
-            "engine": "Yandex Images",
-            "ok": False,
-            "results": [],
-            "search_url": None,
-            "error": f"{type(exc).__name__}: {str(exc)[:300]}",
-        }
+    result = await search_fullsize(image_bytes, limit=REVERSE_SEARCH_RESULTS)
+    return {
+        "engine": "Yandex Images",
+        "ok": bool(result.get("ok")),
+        "results": result.get("results", []),
+        "search_url": result.get("search_url"),
+        "error": result.get("error"),
+    }
 
 
 async def google_lens_search(image_bytes: bytes) -> dict[str, Any]:
