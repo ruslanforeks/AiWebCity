@@ -10,11 +10,13 @@
   * «Ул.Губернского 2» без пробела после точки не извлекался регуляркой,
     и побеждала единственная подпись с пробелом — «Губернского 32»;
   * все подписи вели на другой корпус того же колледжа (ул. Рубина, 5),
-    и сервис уверенно выдавал адрес в двух километрах от правильного.
+    и сервис уверенно выдавал адрес в двух километрах от правильного;
+  * введённая пользователем подсказка «куникова 43» отбрасывалась целиком,
+    потому что разбор требовал слово «ул.» или название города.
 """
 import sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
-from app.address_resolve import collect_evidence
+from app.address_resolve import collect_evidence, parse_user_hint
 
 CASES = {
     "gubernskogo2 (правильно: Губернского 2)": {
@@ -41,6 +43,23 @@ CASES = {
         "tags": ["новороссийский колледж строительства и экономики", "нксэ новороссийск",
                  "новороссийск ул.новороссийской республики 28а"],
     },
+    "куникова 43: подсказка пользователя подтверждает улицу": {
+        "expect_top": ("куникова", "43"),
+        "expect_corroborated": True,   # улицу назвали и подписи кандидатов, и пользователь
+        "user_address": "куникова 43",
+        "candidates": [
+            ("Панорама: Атэк, теплоснабжение, ул. Куникова, 43, Новороссийск", 0.90),
+            ("Атэк, теплоснабжение, ул. Куникова, 43", 0.90),
+        ],
+        "tags": ["улица карла маркса 6 новороссийск", "здание", "новороссийск ул энгельса 53"],
+    },
+    "подсказка не подтверждает сама себя": {
+        "expect_top": ("ленина", "1"),
+        "expect_corroborated": False,  # кроме пользователя эту улицу никто не называл
+        "user_address": "ленина 1",
+        "candidates": [],
+        "tags": [],
+    },
     "svobody23 (правильно: Свободы 23)": {
         "expect_top": ("свободы", "23"),
         "expect_corroborated": True,    # улица «свободы» есть в подсказках Яндекса
@@ -54,11 +73,25 @@ CASES = {
 }
 
 ok = True
+
+# Разбор поля «адрес-подсказка»: раньше «куникова 43» терялось целиком.
+print("Разбор подсказки пользователя:")
+for text, expected in [("куникова 43", [("куникова", "43")]),
+                       ("Куникова 43", [("куникова", "43")]),
+                       ("ул. Куникова 43", [("куникова", "43")]),
+                       ("г. Новороссийск, Куникова 43", [("куникова", "43")]),
+                       ("не знаю", [])]:
+    got = parse_user_hint(text)
+    hit = got == expected
+    ok &= hit
+    print(f"  {'PASS' if hit else 'FAIL'}  {text!r} -> {got}")
+print()
+
 for label, case in CASES.items():
     rows = collect_evidence(
         verified_candidates=[{"title": t, "confidence": c, "image_url": f"u{i}"}
                              for i, (t, c) in enumerate(case["candidates"])],
-        yandex_tags=case["tags"], ocr_text="", user_address="",
+        yandex_tags=case["tags"], ocr_text="", user_address=case.get("user_address", ""),
     )
     top = rows[0] if rows else None
     got = (top["street"], top["house"]) if top else None

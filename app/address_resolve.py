@@ -52,6 +52,17 @@ RE_BARE_CITY_FIRST = re.compile(
     re.I,
 )
 
+# Поле «адрес-подсказка» заведомо содержит адрес, поэтому его можно разбирать
+# мягче, чем случайный текст со страницы: без слова «улица» и без названия города.
+# Именно из-за строгого разбора ввод вида «куникова 43» терялся целиком.
+RE_HINT = re.compile(
+    rf"^\s*(?:г\.?\s*)?(?:новоросси\w*[\s,]*)?(?:{STREET_PREFIX}{_SEP})?"
+    rf"([а-яa-z][а-яa-z0-9'’-]{{2,}}(?:\s+[а-яa-z][а-яa-z0-9'’-]{{2,}}){{0,2}})"
+    rf"[\s,]*(?:д\.?\s*|дом\s*)?(\d{{1,4}}[а-я]?(?:/\d{{1,4}})?)\s*"
+    rf"(?:[,\s]+новоросси\w*.*)?$",
+    re.I,
+)
+
 STOP_STREET_WORDS = {
     "новороссийск", "россия", "край", "город", "фото", "карта", "дом", "квартира", "купить",
     "продажа", "аренда", "панорама", "яндекс", "google", "wikimedia", "commons", "объявления",
@@ -81,6 +92,19 @@ def extract_street_house(text: str) -> list[tuple[str, str]]:
             if _valid_street(street) and house and (street, house) not in found:
                 found.append((street, house))
     return found
+
+
+def parse_user_hint(address: str) -> list[tuple[str, str]]:
+    """Разбор поля «адрес-подсказка». Сначала обычными шаблонами, затем мягким."""
+    found = extract_street_house(address)
+    if found:
+        return found
+    match = RE_HINT.match(_clean(address))
+    if not match:
+        return []
+    street = re.sub(rf"^{STREET_PREFIX}{_SEP}", "", match.group(1).strip(" ,.")).strip()
+    house = match.group(2).strip(" ,.")
+    return [(street, house)] if _valid_street(street) and house else []
 
 
 def extract_place_names(tags: list[str]) -> list[str]:
@@ -162,11 +186,11 @@ def collect_evidence(
         add(street, house, "photo_ocr", 45.0, ocr_text)
 
     # Подсказка пользователя — слабый тай-брейк, сама себя подтверждать не должна.
-    for street, house in extract_street_house(user_address):
+    for street, house in parse_user_hint(user_address):
         add(street, house, "user_hint", 8.0, user_address)
 
     photo_streets, photo_houses = image_derived_addresses(yandex_tags, ocr_text)
-    hint_streets = {street for street, _ in extract_street_house(user_address)}
+    hint_streets = {street for street, _ in parse_user_hint(user_address)}
 
     rows = list(groups.values())
     for row in rows:
@@ -186,7 +210,10 @@ def collect_evidence(
         # OCR с фотографии или адресом пользователя. Иначе адрес остаётся догадкой,
         # даже если все подписи кандидатов дружно называют одно и то же место —
         # так система выдавала здание другого корпуса того же колледжа в 2 км.
-        row["street_corroborated"] = row["street"] in photo_streets or row["street"] in hint_streets
+        # Подсказка пользователя подтверждает улицу только тогда, когда её назвал
+        # ещё кто-то: иначе любой введённый адрес подтверждал бы сам себя.
+        hint_supported = row["street"] in hint_streets and any(src != "user_hint" for src in row["sources"])
+        row["street_corroborated"] = row["street"] in photo_streets or hint_supported
         row["house_corroborated"] = key in photo_houses
         row["independent_candidates"] = independent_candidates
         row.pop("candidate_ids", None)
