@@ -20,6 +20,11 @@ from .image_fetch import fetch_candidate, new_client, normalize_bytes, to_data_u
 from .main import TIMEWEB_API_BASE, TIMEWEB_TOKEN, VISION_MODEL, extract_json, extract_text, norm_text
 
 VISION_CONCURRENCY = int(os.getenv("VISION_CONCURRENCY", "3"))
+# Каждое сравнение — отдельный платный вызов Vision. Проверяем кандидатов волнами
+# и останавливаемся, как только подтверждений уже достаточно: на «лёгких» фото
+# это экономит половину вызовов, а показываем мы всё равно не больше восьми фото.
+VISION_EARLY_STOP = int(os.getenv("VISION_EARLY_STOP", "4"))
+VISION_ACCEPT_THRESHOLD = float(os.getenv("VISUAL_CONFIDENCE_THRESHOLD", "0.72"))
 VISION_TIMEOUT = float(os.getenv("VISION_TIMEOUT", "90"))
 ORIGINAL_MAX_SIDE = int(os.getenv("VISION_ORIGINAL_MAX_SIDE", "1024"))
 CANDIDATE_MAX_SIDE = int(os.getenv("VISION_CANDIDATE_MAX_SIDE", "768"))
@@ -134,20 +139,32 @@ async def verify_candidates(
 
     # Картинка кандидата скачивается прямо перед сравнением и сразу отпускается:
     # на VPS с 1 ГБ памяти держать все кандидаты одновременно нельзя.
-    semaphore = asyncio.Semaphore(VISION_CONCURRENCY)
+    results: list[dict[str, Any]] = []
+    confirmed = 0
 
     async with new_client() as fetch_client, httpx.AsyncClient(timeout=VISION_TIMEOUT) as vision_client:
         async def worker(candidate: dict[str, Any]) -> dict[str, Any]:
-            async with semaphore:
-                data, used_url = await fetch_candidate(fetch_client, candidate, max_side=CANDIDATE_MAX_SIDE)
-                if not data:
-                    return _fail(candidate, "candidate_image_unreachable")
-                try:
-                    return await _compare_one(vision_client, original_data_url, candidate, data, used_url)
-                finally:
-                    del data
+            data, used_url = await fetch_candidate(fetch_client, candidate, max_side=CANDIDATE_MAX_SIDE)
+            if not data:
+                return _fail(candidate, "candidate_image_unreachable")
+            try:
+                return await _compare_one(vision_client, original_data_url, candidate, data, used_url)
+            finally:
+                del data
 
-        results = list(await asyncio.gather(*(worker(c) for c in selected)))
+        for start in range(0, len(selected), VISION_CONCURRENCY):
+            wave = selected[start:start + VISION_CONCURRENCY]
+            wave_results = list(await asyncio.gather(*(worker(c) for c in wave)))
+            results.extend(wave_results)
+            confirmed += sum(
+                1 for item in wave_results
+                if item.get("same_place") and float(item.get("confidence", 0.0)) >= VISION_ACCEPT_THRESHOLD
+            )
+            if confirmed >= VISION_EARLY_STOP:
+                break
+            # Если шлюз недоступен целиком (кончился лимит), продолжать бессмысленно.
+            if all("usage limit" in norm_text(item.get("visual_error")).lower() for item in wave_results):
+                break
 
     return sorted(results, key=lambda x: (bool(x.get("same_place")), float(x.get("confidence", 0.0))), reverse=True)
 
