@@ -1,130 +1,22 @@
 from __future__ import annotations
 
 import io
-import re
+import os
 from typing import Any
 
-import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image
 
-from .main import STATIC_DIR, MAX_UPLOAD_MB, TIMEWEB_TOKEN, extract_year, norm_text, pastvu_search, wikimedia_search
+from . import address_resolve
+from .main import MAX_UPLOAD_MB, STATIC_DIR, TIMEWEB_TOKEN, extract_year, norm_text, pastvu_search, wikimedia_search
 from .reverse_search import search as reverse_image_search
-from .visual_compare import extract_address_hints, verify_candidates
+from .visual_compare import verify_candidates
 
-app = FastAPI(title="AiWebCity", version="1.0.4-recall")
+app = FastAPI(title="AiWebCity", version="1.2.0-recall")
 
-
-def _is_novorossiysk(text: str) -> bool:
-    value = norm_text(text).lower().replace("ё", "е")
-    return "новороссийск" in value or "novorossiysk" in value
-
-
-def _candidate_source_text(candidate: dict[str, Any]) -> str:
-    return norm_text(" ".join([
-        norm_text(candidate.get("title")),
-        norm_text(candidate.get("description")),
-        norm_text(candidate.get("site")),
-        norm_text(candidate.get("page_url")),
-    ]))
-
-
-def _has_street_or_address(text: str) -> bool:
-    value = text.lower().replace("ё", "е")
-    return bool(re.search(r"(?:ул\.?|улица|просп\.?|проспект|пер\.?|переулок|шоссе|наб\.?|набережная)\s+[а-яa-z0-9 .-]+", value))
-
-
-async def _geocode_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
-    source_text = _candidate_source_text(candidate)
-    if any(city in source_text.lower().replace("ё", "е") for city in {
-        "геленджик", "геледжик", "анапа", "краснодар", "сочи", "туапсе",
-        "севастополь", "симферополь", "ростов-на-дону", "майкоп", "армавир", "керчь",
-    }):
-        return None
-
-    hints = extract_address_hints(candidate)
-    if not hints and not (_is_novorossiysk(source_text) and _has_street_or_address(source_text)):
-        return None
-    if not hints:
-        hints = [source_text[:180]]
-
-    seen: set[str] = set()
-    queries: list[str] = []
-    for hint in hints:
-        hint = norm_text(hint)
-        if hint and hint not in seen:
-            seen.add(hint)
-            queries.append(hint)
-
-    headers = {"User-Agent": "AiWebCity/1.0 (+https://aiweb.su/)"}
-    async with httpx.AsyncClient(timeout=15, headers=headers) as client:
-        for query in queries[:5]:
-            q = query if _is_novorossiysk(query) else f"{query}, Новороссийск, Россия"
-            try:
-                response = await client.get(
-                    "https://nominatim.openstreetmap.org/search",
-                    params={"q": q, "format": "jsonv2", "limit": 5, "addressdetails": 1},
-                )
-                if response.status_code >= 400:
-                    continue
-                rows = response.json()
-            except (httpx.HTTPError, ValueError):
-                continue
-            for row in rows if isinstance(rows, list) else []:
-                display = norm_text(row.get("display_name"))
-                if not _is_novorossiysk(display):
-                    continue
-                addr = row.get("address") if isinstance(row.get("address"), dict) else {}
-                street = norm_text(addr.get("road") or addr.get("pedestrian") or addr.get("residential"))
-                house = norm_text(addr.get("house_number"))
-                if not street:
-                    continue
-                return {
-                    "lat": float(row["lat"]),
-                    "lon": float(row["lon"]),
-                    "display_name": display,
-                    "street": street,
-                    "house_number": house,
-                    "city": norm_text(addr.get("city") or addr.get("town") or "Новороссийск"),
-                    "address_verified": True,
-                    "house_number_verified": bool(house),
-                }
-    return None
-
-
-def _pretty_address(location: dict[str, Any] | None) -> str:
-    if not location:
-        return ""
-    street = norm_text(location.get("street"))
-    house = norm_text(location.get("house_number"))
-    if street and house:
-        return f"Новороссийск, {street}, {house}"
-    if street:
-        return f"Новороссийск, {street}"
-    return norm_text(location.get("display_name"))
-
-
-async def _verify_candidates(original: bytes, content_type: str, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    visual = await verify_candidates(original, content_type, candidates, limit=12)
-    enriched: list[dict[str, Any]] = []
-    for item in visual:
-        visual_ok = bool(item.get("same_place")) and float(item.get("confidence", 0.0)) >= 0.72
-        location = await _geocode_candidate(item) if visual_ok else None
-        copy = dict(item)
-        copy["visual_verified"] = visual_ok
-        copy["address_verified"] = bool(location)
-        copy["location"] = location
-        copy["resolved_address"] = _pretty_address(location)
-        enriched.append(copy)
-    return sorted(
-        enriched,
-        key=lambda x: (
-            bool(x.get("visual_verified")) and bool(x.get("address_verified")),
-            float(x.get("confidence", 0.0)),
-        ),
-        reverse=True,
-    )
+VISUAL_CHECK_LIMIT = int(os.getenv("VISUAL_CHECK_LIMIT", "14"))
+VISUAL_CONFIDENCE_THRESHOLD = float(os.getenv("VISUAL_CONFIDENCE_THRESHOLD", "0.72"))
 
 
 def _dedupe_images(items: list[dict[str, Any]], limit: int = 24) -> list[dict[str, Any]]:
@@ -145,6 +37,24 @@ def _dedupe_images(items: list[dict[str, Any]], limit: int = 24) -> list[dict[st
     return result
 
 
+def _empty_response(message: str, **extra: Any) -> dict[str, Any]:
+    """Ответ без подтверждённого объекта. status переопределяется через extra."""
+    payload = {
+        "status": "uncertain",
+        "city": "Новороссийск",
+        "place": None,
+        "verification": {"visual_match": False, "address_verified": False},
+        "candidate_images": [],
+        "matched_images": [],
+        "historical_images": [],
+        "message": message,
+        "privacy": {"server_storage": False},
+        "generation": {"enabled": False},
+    }
+    payload.update(extra)
+    return payload
+
+
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index_pic.html")
@@ -155,9 +65,9 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "token_configured": bool(TIMEWEB_TOKEN),
-        "reverse_search": "PicImageSearch with Yandex originalImage extraction + Google Lens",
-        "reverse_search_engines": ["Yandex Images (original when available)", "Google Lens"],
-        "identification_mode": "reverse-search-variants-then-visual-verification",
+        "reverse_search": "Yandex CBIR: sites + similar + tags + object crops + OCR",
+        "reverse_search_engines": ["Yandex Images (exact + visually similar)", "Google Lens"],
+        "identification_mode": "object-crops -> candidate-pool -> parallel-visual-verification -> address-cross-check",
         "city_scope": "Новороссийск",
         "photo_persistence": False,
         "generation": False,
@@ -180,71 +90,142 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
     address_hint = norm_text(address)
     reverse_result = await reverse_image_search(raw, address=address_hint)
     candidates = reverse_result.get("results", [])
-    if not candidates:
-        return {
-            "status": "uncertain",
-            "city": "Новороссийск",
-            "place": None,
-            "verification": {"visual_match": False, "address_verified": False},
-            "candidate_images": [],
-            "matched_images": [],
-            "historical_images": [],
-            "message": "Обратный поиск не нашёл фотографий, которые можно надёжно проверить визуально.",
-            "privacy": {"server_storage": False},
-            "generation": {"enabled": False},
-        }
+    yandex_tags = reverse_result.get("yandex_tags", [])
+    ocr_text = reverse_result.get("ocr_text", "")
 
-    verifications = await _verify_candidates(raw, content_type, candidates)
-    accepted = [x for x in verifications if x.get("visual_verified") and x.get("address_verified")]
+    if reverse_result.get("captcha"):
+        return _empty_response(
+            "Поисковый сервис временно ограничил запросы с нашего сервера. Попробуйте ещё раз через несколько минут.",
+            debug={"captcha": True, "passes": reverse_result.get("passes")},
+        )
+    if not candidates:
+        return _empty_response(
+            "Обратный поиск не нашёл фотографий, которые можно надёжно проверить визуально.",
+            debug={"passes": reverse_result.get("passes"), "elapsed_seconds": reverse_result.get("elapsed_seconds")},
+        )
+
+    verifications = await verify_candidates(raw, content_type, candidates, limit=VISUAL_CHECK_LIMIT)
+
+    # Если Vision вообще не отвечает (кончился лимит, упал шлюз), это НЕ то же
+    # самое, что «совпадений не найдено». Пользователю нужно сказать правду.
+    vision_errors = [norm_text(item.get("visual_error")) for item in verifications if item.get("visual_error")]
+    reachable = [item for item in verifications if not item.get("visual_error")]
+    quota_blocked = any("usage limit" in error.lower() or "timeweb_42" in error.lower() for error in vision_errors)
+    if verifications and not reachable:
+        return _empty_response(
+            "Сервис визуальной проверки сейчас недоступен"
+            + (" (исчерпан лимит Timeweb AI)." if quota_blocked else ".")
+            + " Кандидаты найдены, но подтвердить их без визуальной проверки нельзя.",
+            status="verification_unavailable",
+            candidate_images=[
+                {"image_url": item.get("image_url"), "preview_url": item.get("preview_url") or item.get("thumb_url")}
+                for item in verifications[:12] if item.get("image_url") or item.get("thumb_url")
+            ],
+            debug={
+                "reverse_candidates": len(candidates),
+                "raw_result_count": reverse_result.get("raw_result_count"),
+                "yandex_tags": yandex_tags[:6],
+                "vision_errors": vision_errors[:3],
+                "quota_blocked": quota_blocked,
+            },
+        )
+
+    accepted = [
+        item for item in verifications
+        if item.get("same_place") and float(item.get("confidence", 0.0)) >= VISUAL_CONFIDENCE_THRESHOLD
+    ]
+
+    resolved = await address_resolve.resolve(
+        verified_candidates=accepted,
+        yandex_tags=yandex_tags,
+        ocr_text=ocr_text,
+        user_address=address_hint,
+    )
+    location = resolved.get("location")
 
     place = None
-    matched_images: list[dict[str, Any]] = []
     if accepted:
         best = accepted[0]
-        location = best.get("location") or {}
         place = {
-            "address": best.get("resolved_address") or location.get("display_name"),
-            "street": location.get("street"),
-            "house_number": location.get("house_number") or None,
-            "lat": location.get("lat"),
-            "lon": location.get("lon"),
+            "address": resolved.get("address") or None,
+            "street": (location or {}).get("street"),
+            "house_number": (location or {}).get("house_number") or None,
+            "lat": (location or {}).get("lat"),
+            "lon": (location or {}).get("lon"),
             "confidence": float(best.get("confidence", 0.0)),
+            "object": best.get("which_object") or None,
+            "address_precision": (location or {}).get("precision"),
         }
-        matched_images = [
-            {"image_url": x.get("image_url"), "confidence": float(x.get("confidence", 0.0))}
-            for x in accepted[:8]
-            if x.get("image_url")
-        ]
+
+    matched_images = [
+        {
+            "image_url": item.get("image_url"),
+            "confidence": float(item.get("confidence", 0.0)),
+            "matching_features": item.get("matching_features", [])[:3],
+        }
+        for item in accepted[:8]
+        if item.get("image_url")
+    ]
 
     historical: list[dict[str, Any]] = []
-    if place and place.get("lat") is not None and place.get("lon") is not None:
+    if location and location.get("lat") is not None:
         requested_year = extract_year(year) or 1999
-        historical.extend(await pastvu_search(float(place["lat"]), float(place["lon"]), requested_year))
+        historical.extend(await pastvu_search(float(location["lat"]), float(location["lon"]), requested_year))
         queries = [
-            f"Новороссийск {norm_text(place.get('address'))}",
-            f"Новороссийск {norm_text(place.get('street'))}",
+            f"Новороссийск {norm_text(resolved.get('address'))}",
+            f"Новороссийск {norm_text(location.get('street'))}",
         ]
         queries = list(dict.fromkeys(q for q in queries if q.strip() != "Новороссийск"))
         if queries:
             historical.extend(await wikimedia_search(queries, limit=12))
 
+    if accepted and location:
+        status, message = "identified", "Здание визуально подтверждено, затем независимо проверен его адрес."
+    elif accepted:
+        status, message = (
+            "visual_only",
+            "Здание визуально подтверждено на нескольких фотографиях, но точный адрес пока не подтверждён по открытым данным.",
+        )
+    else:
+        status, message = (
+            "uncertain",
+            "Похожие фотографии найдены, но надёжного визуального совпадения нет. Сомнительный результат не выдаём за подтверждённый.",
+        )
+
     return {
-        "status": "identified" if place else "uncertain",
+        "status": status,
         "city": "Новороссийск",
         "place": place,
-        "verification": {"visual_match": bool(place), "address_verified": bool(place)},
-        "candidate_images": [{"image_url": x.get("image_url"), "preview_url": x.get("preview_url")} for x in verifications[:12] if x.get("image_url")],
+        "verification": {
+            "visual_match": bool(accepted),
+            "address_verified": bool(location),
+            "visual_matches": len(accepted),
+            "checked": len(verifications),
+        },
+        "candidate_images": [
+            {"image_url": item.get("image_url"), "preview_url": item.get("preview_url") or item.get("thumb_url")}
+            for item in verifications[:12]
+            if item.get("image_url") or item.get("thumb_url")
+        ],
         "matched_images": matched_images,
         "historical_images": _dedupe_images(historical, 24),
-        "message": (
-            "Здание визуально подтверждено, затем проверен его адрес."
-            if place else
-            "Похожие фотографии найдены, но надёжного визуального совпадения с подтверждённым адресом нет."
-        ),
+        "message": message,
         "privacy": {
             "server_storage": False,
             "note": "Фото не записывается на VPS; оно используется в памяти и временно передаётся внешним поисковым и AI-сервисам.",
         },
         "generation": {"enabled": False},
-        "debug": {"reverse_candidates": len(candidates), "visual_checks": len(verifications)},
+        "debug": {
+            "reverse_candidates": len(candidates),
+            "raw_result_count": reverse_result.get("raw_result_count"),
+            "passes": reverse_result.get("passes"),
+            "detected_objects": reverse_result.get("detected_objects"),
+            "yandex_tags": yandex_tags[:6],
+            "ocr_text": ocr_text[:200],
+            "visual_checks": len(verifications),
+            "visual_errors": vision_errors[:5],
+            "address_hypotheses": resolved.get("hypotheses"),
+            "search_seconds": reverse_result.get("elapsed_seconds"),
+            "cached_search": reverse_result.get("cached"),
+        },
     }

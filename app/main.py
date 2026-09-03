@@ -20,6 +20,8 @@ TIMEWEB_API_BASE = os.getenv("TIMEWEB_API_BASE", "https://api.timeweb.ai/v1").rs
 TIMEWEB_TOKEN = os.getenv("TIMEWEB_AI_TOKEN", "").strip()
 VISION_MODEL = os.getenv("TIMEWEB_VISION_MODEL", "openai/gpt-4.1-mini")
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "12"))
+# Wikimedia требует User-Agent с названием проекта и контактом, иначе 403.
+USER_AGENT = "AiWebCity/1.2 (https://github.com/ruslanforeks/AiWebCity; city history project)"
 PASTVU_API_URL = "https://api.pastvu.com/api2"
 WIKIMEDIA_API_URL = "https://commons.wikimedia.org/w/api.php"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
@@ -249,15 +251,20 @@ async def resolve_identity(analysis: dict[str, Any], reverse_items: list[dict[st
     return {"status": "identified" if best and best["strong"] else "uncertain", "best": best, "candidates": resolved[:5]}
 
 
-async def pastvu_search(lat: float, lon: float, year_to: int = 1999) -> list[dict[str, Any]]:
-    params = {"method": "photo.giveNearestPhotos", "params": json.dumps({"geo": [lat, lon], "distance": 400, "year2": year_to, "limit": 30}, separators=(",", ":"))}
+async def pastvu_search(lat: float, lon: float, year_to: int = 1999, *, distance: int = 500, year_from: int = 1850) -> list[dict[str, Any]]:
+    # API отдаёт список под ключом "photos". Раньше здесь читался ключ "photo",
+    # поэтому PastVu всегда возвращал пустой результат, хотя фотографии были.
+    query = {"geo": [lat, lon], "distance": distance, "year": year_from, "year2": year_to, "limit": 30}
+    params = {"method": "photo.giveNearestPhotos", "params": json.dumps(query, separators=(",", ":"))}
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT}) as client:
             response = await client.get(PASTVU_API_URL, params=params)
         if response.status_code >= 400:
             return []
+        result = response.json().get("result", {})
+        photos = result.get("photos") or result.get("photo") or []
         out = []
-        for item in response.json().get("result", {}).get("photo", []):
+        for item in photos:
             fid = norm_text(item.get("file"))
             if not fid:
                 continue
@@ -273,11 +280,11 @@ async def pastvu_search(lat: float, lon: float, year_to: int = 1999) -> list[dic
 
 async def wikimedia_search(queries: list[str], limit: int = 12) -> list[dict[str, Any]]:
     merged = {}
-    async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "AiWebCity/0.9"}) as client:
+    async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT}) as client:
         for query in queries[:6]:
             if not norm_text(query):
                 continue
-            params = {"action": "query", "generator": "search", "gsrnamespace": 6, "gsrsearch": query, "gsrlimit": 8, "prop": "imageinfo", "iiprop": "url|extmetadata", "iiurlwidth": 900, "format": "json", "formatversion": 2}
+            params = {"action": "query", "generator": "search", "gsrnamespace": 6, "gsrsearch": query, "gsrlimit": 8, "prop": "imageinfo|info", "inprop": "url", "iiprop": "url|extmetadata", "iiurlwidth": 900, "format": "json", "formatversion": 2}
             try:
                 response = await client.get(WIKIMEDIA_API_URL, params=params)
                 if response.status_code >= 400:

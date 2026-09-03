@@ -1,25 +1,52 @@
+"""Сбор пула кандидатов: Yandex CBIR (+ кропы по детектору) и Google Lens.
+
+Порядок такой же, как в целевом пайплайне проекта:
+    полное фото -> детектор объектов Яндекса -> кроп здания -> повторный поиск
+    -> объединение -> дедупликация -> текстовый ранкинг под Новороссийск.
+
+Сначала recall, потом precision: отсюда выходит большой пул, а отсечение
+делает уже визуальная верификация.
+"""
+
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
-import json
+import os
 import re
+import time
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from PicImageSearch import GoogleLens, Network, Yandex
 from PIL import Image
 
-REVERSE_SEARCH_TIMEOUT = 45.0
-REVERSE_SEARCH_RESULTS = 18
-FINAL_RESULTS = 36
-SEARCH_VARIANTS = 4
+from .image_fetch import encode_jpeg
+from .yandex_cbir import BUILDING_CATEGORIES, cbir_search, yandex_image_id
 
-NOVOROSSIYSK_TERMS = {"новороссийск", "novorossiysk", "новороссийского", "новороссийске", "новороссийском"}
+REVERSE_SEARCH_TIMEOUT = float(os.getenv("REVERSE_SEARCH_TIMEOUT", "45"))
+FINAL_RESULTS = int(os.getenv("REVERSE_SEARCH_RESULTS", "60"))
+# Сколько запросов к Яндексу разрешено на одну фотографию. Больше запросов —
+# лучше recall, но выше риск капчи на IP сервера.
+MAX_YANDEX_PASSES = int(os.getenv("YANDEX_MAX_PASSES", "3"))
+GOOGLE_LENS_ENABLED = os.getenv("GOOGLE_LENS_ENABLED", "true").lower() != "false"
+CACHE_TTL_SECONDS = float(os.getenv("REVERSE_SEARCH_CACHE_TTL", "900"))
 
-OTHER_CITIES = {"геленджик", "геледжик", "анапа", "краснодар", "сочи", "ростов-на-дону", "ростов на дону", "майкоп", "туапсе", "армавир", "керчь", "севастополь", "симферополь"}
+NOVOROSSIYSK_TERMS = {"новороссийск", "novorossiysk", "новороссийского", "новороссийске", "новороссийском", "нврск"}
 
-NOISE_TERMS = {"интерьер", "квартира", "комната", "кухня", "ванная", "планировка", "обои", "мебель", "диван", "товар", "каталог", "автомобиль", "машина", "мотоцикл", "телефон", "обои на телефон", "декор", "дизайн интерьера"}
+OTHER_CITIES = {
+    "геленджик", "геледжик", "анапа", "краснодар", "сочи", "ростов-на-дону", "ростов на дону",
+    "майкоп", "туапсе", "армавир", "керчь", "севастополь", "симферополь", "волгоград", "астрахань",
+    "москва", "санкт-петербург", "екатеринбург", "самара", "казань", "воронеж", "саратов",
+}
+
+NOISE_TERMS = {
+    "интерьер", "квартира", "комната", "кухня", "ванная", "планировка", "обои", "мебель", "диван",
+    "товар", "каталог", "автомобиль", "мотоцикл", "телефон", "обои на телефон", "декор",
+    "дизайн интерьера", "купить квартиру", "снять квартиру", "продажа квартир",
+}
+
+_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def norm_text(value: Any) -> str:
@@ -34,99 +61,63 @@ def normalize_url(value: Any) -> str:
         parts = urlsplit(value)
         if not parts.netloc:
             return value.lower().rstrip("/")
-        keep = []
-        for key, val in parse_qsl(parts.query, keep_blank_values=True):
-            if key.lower().startswith("utm_") or key.lower() in {"from", "ref", "source", "tracking"}:
-                continue
-            keep.append((key, val))
+        keep = [
+            (key, val)
+            for key, val in parse_qsl(parts.query, keep_blank_values=True)
+            if not key.lower().startswith("utm_") and key.lower() not in {"from", "ref", "source", "tracking", "n"}
+        ]
         return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), urlencode(keep), "")).lower()
     except Exception:
         return value.lower().rstrip("/")
 
 
-def image_identity(image_url: str) -> str:
-    normalized = normalize_url(image_url)
-    if not normalized:
-        return ""
-    match = re.search(r"[?&]id=([a-z0-9_-]{12,})", normalized, re.I)
-    if match:
-        return f"yandex-id:{match.group(1).lower()}"
-    match = re.search(r"/i\?id=([a-z0-9_-]{12,})", normalized, re.I)
-    if match:
-        return f"yandex-id:{match.group(1).lower()}"
-    return normalized
+def image_identity(candidate: dict[str, Any]) -> str:
+    """Устойчивый ключ дедупликации: один и тот же файл на разных страницах — один кандидат."""
+    yandex_id = yandex_image_id(norm_text(candidate.get("thumb_url"))) or yandex_image_id(norm_text(candidate.get("image_url")))
+    if yandex_id:
+        return f"yandex-id:{yandex_id}"
+    normalized = normalize_url(candidate.get("image_url"))
+    if normalized:
+        return normalized
+    return normalize_url(candidate.get("page_url"))
 
 
-def _absolute_url(value: Any) -> str:
-    value = norm_text(value)
-    return "https:" + value if value.startswith("//") else value
+def _crop_bytes(image: Image.Image, box: tuple[float, float, float, float], *, pad: float = 0.06) -> bytes:
+    width, height = image.size
+    x0, y0, x1, y1 = box
+    x0 = max(0.0, x0 - pad)
+    y0 = max(0.0, y0 - pad)
+    x1 = min(1.0, x1 + pad)
+    y1 = min(1.0, y1 + pad)
+    crop = image.crop((int(x0 * width), int(y0 * height), int(x1 * width), int(y1 * height)))
+    return encode_jpeg(crop, max_side=1400, quality=90)
 
 
-def _extract_yandex_originals(response: Any) -> list[dict[str, Any]]:
-    try:
-        origin = getattr(response, "origin", None)
-        root = origin.find('div.Root[id^="ImagesApp-"]') if origin is not None else None
-        state = root.attr("data-state") if root is not None else None
-        if not state:
-            return []
-        data = json.loads(str(state))
-        sites = (((data or {}).get("initialState") or {}).get("cbirSites") or {}).get("sites") or []
-        if not isinstance(sites, list):
-            return []
-        result = []
-        for site in sites:
-            if not isinstance(site, dict):
-                continue
-            original = site.get("originalImage") if isinstance(site.get("originalImage"), dict) else {}
-            url = next((_absolute_url(original.get(key)) for key in ("url", "originUrl", "origin_url", "src") if _absolute_url(original.get(key))), "")
-            result.append({"url": url, "width": original.get("width"), "height": original.get("height")})
-        return result
-    except Exception:
-        return []
+def pick_object_crops(crops: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    """Отбирает bbox, ради которых имеет смысл тратить отдельный запрос.
+
+    Приоритет — здания. Кропы «машина»/«растение» для идентификации места
+    бесполезны и только жгут лимит запросов.
+    """
+    buildings = [c for c in crops if c["category"] in BUILDING_CATEGORIES and 0.06 <= c["area"] <= 0.92]
+    return buildings[:limit]
 
 
-def item_to_dict(item: Any, source: str, *, original_url: str = "", original_size: str = "", variant: str = "full") -> dict[str, Any]:
-    title = norm_text(getattr(item, "title", ""))
-    page_url = norm_text(getattr(item, "url", ""))
-    thumb = norm_text(getattr(item, "thumbnail", ""))
-    return {
-        "image_url": norm_text(original_url) or thumb,
-        "preview_url": thumb,
-        "page_url": page_url,
-        "title": title or f"Результат {source}",
-        "description": norm_text(getattr(item, "content", "")),
-        "source": source,
-        "kind": "reverse_image",
-        "site": norm_text(getattr(item, "source", "")),
-        "size": original_size or norm_text(getattr(item, "size", "")),
-        "image_quality": "original" if original_url else "preview_fallback",
-        "search_variant": variant,
-    }
+def fallback_crops(image: Image.Image, *, limit: int) -> list[bytes]:
+    """Если детектор Яндекса ничего не отдал — режем кадр сами.
 
-
-def _make_search_variants(image_bytes: bytes) -> list[tuple[str, bytes]]:
-    variants = [("full", image_bytes)]
-    try:
-        with Image.open(io.BytesIO(image_bytes)) as image:
-            image = image.convert("RGB")
-            width, height = image.size
-            if width / max(height, 1) >= 1.25:
-                crop_width = max(1, int(width * 0.62))
-                for name, start in (("left", 0.0), ("center", 0.19), ("right", 0.38)):
-                    left = min(width - crop_width, max(0, int(width * start)))
-                    crop = image.crop((left, 0, left + crop_width, height))
-                    out = io.BytesIO(); crop.save(out, format="JPEG", quality=92, optimize=True)
-                    variants.append((name, out.getvalue()))
-            else:
-                crop_height = max(1, int(height * 0.68))
-                for name, start in (("top", 0.0), ("center", 0.16), ("bottom", 0.32)):
-                    top = min(height - crop_height, max(0, int(height * start)))
-                    crop = image.crop((0, top, width, top + crop_height))
-                    out = io.BytesIO(); crop.save(out, format="JPEG", quality=92, optimize=True)
-                    variants.append((name, out.getvalue()))
-    except Exception:
-        return variants
-    return variants[:SEARCH_VARIANTS]
+    Это сценарий «пользователь снял улицу»: на кадре несколько фасадов,
+    и целиком он не ищется ни у кого.
+    """
+    width, height = image.size
+    boxes: list[tuple[float, float, float, float]] = []
+    if width / max(height, 1) >= 1.2:
+        boxes = [(0.0, 0.0, 0.58, 1.0), (0.42, 0.0, 1.0, 1.0)]
+    elif height / max(width, 1) >= 1.2:
+        boxes = [(0.0, 0.0, 1.0, 0.62), (0.0, 0.30, 1.0, 0.95)]
+    else:
+        boxes = [(0.12, 0.0, 0.88, 0.85)]
+    return [_crop_bytes(image, box, pad=0.0) for box in boxes[:limit]]
 
 
 def _tokens_for_address(address: str) -> tuple[list[str], str]:
@@ -139,96 +130,209 @@ def _tokens_for_address(address: str) -> tuple[list[str], str]:
 
 
 def _result_text(item: dict[str, Any]) -> str:
-    return " ".join(norm_text(item.get(key)) for key in ("title", "description", "site", "page_url", "image_url")).lower().replace("ё", "е")
+    return " ".join(
+        norm_text(item.get(key)) for key in ("title", "description", "site", "page_url", "image_url")
+    ).lower().replace("ё", "е")
 
 
-def rank_novorossiysk(items: list[dict[str, Any]], address: str, limit: int = FINAL_RESULTS) -> list[dict[str, Any]]:
+def rank_candidates(items: list[dict[str, Any]], address: str, limit: int = FINAL_RESULTS) -> list[dict[str, Any]]:
+    """Текстовый предварительный ранкинг.
+
+    Это только порядок, в котором кандидаты пойдут на визуальную проверку.
+    Текст здесь НЕ является доказательством совпадения — он лишь решает,
+    кого показать Vision-модели первым при ограниченном бюджете.
+    """
     address_lower = norm_text(address).lower().replace("ё", "е")
     street_tokens, house_number = _tokens_for_address(address)
-    scored = []
+    scored: list[tuple[float, int, dict[str, Any]]] = []
+
     for position, item in enumerate(items):
-        if not norm_text(item.get("image_url")):
+        if not norm_text(item.get("image_url")) and not norm_text(item.get("thumb_url")):
             continue
         text = _result_text(item)
-        if any(city in text for city in OTHER_CITIES):
-            continue
-        score = max(0, 24 - position // 2)
+
+        score = 0.0
+        # Точное совпадение файла — сильнее, чем «похожее изображение».
+        score += 45.0 if item.get("match_type") == "exact" else 0.0
+        # Порядок внутри выдачи Яндекса — это его собственная оценка похожести.
+        score += max(0.0, 26.0 - float(item.get("rank", 0)) * 0.6)
+        # Кроп здания важнее, чем поиск по всему кадру с улицей.
+        if item.get("search_pass", "").startswith("crop"):
+            score += 6.0
+
         if any(term in text for term in NOVOROSSIYSK_TERMS):
-            score += 40
+            score += 34.0
+        elif any(city in text for city in OTHER_CITIES):
+            # Другой город в подписи — почти наверняка не наш объект,
+            # но полностью выкидывать нельзя: подпись бывает мусорной.
+            score -= 55.0
+
         if address_lower and address_lower in text:
-            score += 25
+            score += 20.0
         matched_street = sum(1 for token in street_tokens if token in text)
         if matched_street:
-            score += min(matched_street, 4) * 14
+            score += min(matched_street, 4) * 11.0
         if house_number and re.search(rf"(?<!\d){re.escape(house_number)}(?!\d)", text):
-            score += 20
-        if any(term in norm_text(item.get("page_url")).lower() for term in street_tokens[:3]):
-            score += 10
+            score += 14.0
         if any(term in text for term in NOISE_TERMS):
-            score -= 80
-        copy = dict(item); copy["candidate_rank_score"] = score
+            score -= 45.0
+        if not norm_text(item.get("image_url")):
+            score -= 8.0
+
+        copy = dict(item)
+        copy["text_score"] = round(score, 1)
         scored.append((score, -position, copy))
-    seen = set(); result = []
+
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
     for _, _, item in sorted(scored, key=lambda row: (row[0], row[1]), reverse=True):
-        key = image_identity(norm_text(item.get("image_url"))) or normalize_url(item.get("page_url"))
+        key = image_identity(item)
         if not key or key in seen:
             continue
-        seen.add(key); item.pop("candidate_rank_score", None); result.append(item)
+        seen.add(key)
+        result.append(item)
         if len(result) >= limit:
             break
     return result
 
 
-def dedupe(items: list[dict[str, Any]], limit: int = 120) -> list[dict[str, Any]]:
-    seen = set(); out = []
+def dedupe(items: list[dict[str, Any]], limit: int = 200) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
     for item in items:
-        key = image_identity(norm_text(item.get("image_url"))) or normalize_url(item.get("page_url"))
+        key = image_identity(item)
         if not key or key in seen:
             continue
-        seen.add(key); out.append(item)
+        seen.add(key)
+        out.append(item)
         if len(out) >= limit:
             break
     return out
 
 
-async def yandex_search(image_bytes: bytes, variant: str = "full") -> dict[str, Any]:
+def _candidates_from_pass(result: dict[str, Any], pass_name: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in list(result.get("sites") or []) + list(result.get("similar") or []):
+        row = dict(item)
+        row["source"] = "Yandex Images"
+        row["kind"] = "reverse_image"
+        row["search_pass"] = pass_name
+        row["image_quality"] = "original" if row.get("image_url") and "avatars.mds.yandex.net" not in row["image_url"] else "yandex_thumb"
+        row["preview_url"] = row.get("thumb_url") or row.get("image_url")
+        rows.append(row)
+    return rows
+
+
+async def google_lens_search(image_bytes: bytes) -> dict[str, Any]:
+    """Google Lens как дополнительный источник. В наших тестах почти всегда пуст,
+    поэтому он полностью опционален и никогда не роняет основной поиск."""
+    if not GOOGLE_LENS_ENABLED:
+        return {"engine": "Google Lens", "ok": False, "results": [], "error": "disabled"}
     try:
+        from PicImageSearch import GoogleLens, Network
+
         async with Network(timeout=REVERSE_SEARCH_TIMEOUT) as client:
-            response = await asyncio.wait_for(Yandex(client=client, base_url="https://yandex.com").search(file=image_bytes), timeout=REVERSE_SEARCH_TIMEOUT)
-        originals = _extract_yandex_originals(response)
-        raw_items = response.raw or []
+            response = await asyncio.wait_for(
+                GoogleLens(client=client, search_type="all", hl="ru", country="RU").search(file=image_bytes),
+                timeout=REVERSE_SEARCH_TIMEOUT,
+            )
         results = []
-        for index, item in enumerate(raw_items[:REVERSE_SEARCH_RESULTS]):
-            original_url = norm_text(originals[index].get("url")) if index < len(originals) else ""
-            width = originals[index].get("width") if index < len(originals) else None
-            height = originals[index].get("height") if index < len(originals) else None
-            size = f"{width}x{height}" if width and height else ""
-            results.append(item_to_dict(item, "Yandex Images", original_url=original_url, original_size=size, variant=variant))
-        return {"engine": "Yandex Images", "ok": True, "results": results, "search_url": norm_text(getattr(response, "url", "")) or None, "error": None, "original_urls": sum(1 for x in results if x.get("image_quality") == "original"), "variant": variant}
-    except Exception as exc:
-        return {"engine": "Yandex Images", "ok": False, "results": [], "search_url": None, "error": f"{type(exc).__name__}: {str(exc)[:300]}", "original_urls": 0, "variant": variant}
-
-
-async def google_lens_search(image_bytes: bytes, variant: str = "full") -> dict[str, Any]:
-    try:
-        async with Network(timeout=REVERSE_SEARCH_TIMEOUT) as client:
-            response = await asyncio.wait_for(GoogleLens(client=client, search_type="all", hl="ru", country="RU").search(file=image_bytes), timeout=REVERSE_SEARCH_TIMEOUT)
-        return {"engine": "Google Lens", "ok": True, "results": [item_to_dict(i, "Google Lens", variant=variant) for i in (response.raw or [])][:REVERSE_SEARCH_RESULTS], "search_url": norm_text(getattr(response, "url", "")) or None, "error": None, "variant": variant}
-    except Exception as exc:
-        return {"engine": "Google Lens", "ok": False, "results": [], "search_url": None, "error": f"{type(exc).__name__}: {str(exc)[:300]}", "variant": variant}
-
-
-async def _search_variant(name: str, data: bytes, sem: asyncio.Semaphore):
-    async with sem:
-        return await asyncio.gather(yandex_search(data, name), google_lens_search(data, name))
+        for position, item in enumerate(response.raw or []):
+            thumb = norm_text(getattr(item, "thumbnail", ""))
+            results.append({
+                "title": norm_text(getattr(item, "title", "")),
+                "description": norm_text(getattr(item, "content", "")),
+                "page_url": norm_text(getattr(item, "url", "")),
+                "site": norm_text(getattr(item, "source", "")),
+                "image_url": thumb,
+                "thumb_url": thumb,
+                "preview_url": thumb,
+                "source": "Google Lens",
+                "kind": "reverse_image",
+                "match_type": "similar",
+                "rank": position,
+                "search_pass": "full",
+                "image_quality": "preview",
+            })
+        return {"engine": "Google Lens", "ok": True, "results": results, "error": None}
+    except Exception as exc:  # noqa: BLE001
+        return {"engine": "Google Lens", "ok": False, "results": [], "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
 
 
 async def search(image_bytes: bytes, address: str = "") -> dict[str, Any]:
-    variants = _make_search_variants(image_bytes)
-    sem = asyncio.Semaphore(2)
-    pairs = await asyncio.gather(*(_search_variant(name, data, sem) for name, data in variants))
-    yandex_results = [item for pair in pairs for item in (pair[0].get("results") or [])]
-    lens_results = [item for pair in pairs for item in (pair[1].get("results") or [])]
-    raw = dedupe(yandex_results + lens_results, limit=120)
-    filtered = rank_novorossiysk(raw, address, limit=FINAL_RESULTS)
-    return {"enabled": True, "engines": [pair[0] for pair in pairs] + [pair[1] for pair in pairs], "results": filtered, "raw_result_count": len(raw), "search_variants": [name for name, _ in variants]}
+    cache_key = hashlib.sha256(image_bytes).hexdigest() + "|" + norm_text(address).lower()
+    cached = _CACHE.get(cache_key)
+    now = time.time()
+    if cached and now - cached[0] < CACHE_TTL_SECONDS:
+        return {**cached[1], "cached": True}
+
+    started = now
+    passes: list[dict[str, Any]] = []
+    all_candidates: list[dict[str, Any]] = []
+
+    lens_task = asyncio.create_task(google_lens_search(image_bytes))
+
+    first = await cbir_search(image_bytes, timeout=REVERSE_SEARCH_TIMEOUT)
+    passes.append({"name": "full", "ok": first["ok"], "error": first["error"], "sites": len(first["sites"]), "similar": len(first["similar"])})
+    all_candidates.extend(_candidates_from_pass(first, "full"))
+
+    tags = list(first.get("tags") or [])
+    ocr_text = norm_text(first.get("ocr_text"))
+    crops_meta = list(first.get("crops") or [])
+    captcha = bool(first.get("captcha"))
+
+    # Второй и третий проход — по объектам, найденным детектором Яндекса.
+    # При капче дальше не идём, чтобы не усугублять ситуацию с IP.
+    remaining = max(0, MAX_YANDEX_PASSES - 1)
+    if remaining and not captcha:
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                image = image.convert("RGB")
+                selected = pick_object_crops(crops_meta, limit=remaining)
+                crop_payloads: list[tuple[str, bytes]] = [
+                    (f"crop:{crop['category']}", _crop_bytes(image, crop["box"])) for crop in selected
+                ]
+                if not crop_payloads:
+                    crop_payloads = [
+                        (f"crop:auto{index}", data)
+                        for index, data in enumerate(fallback_crops(image, limit=remaining))
+                    ]
+        except Exception:
+            crop_payloads = []
+
+        for pass_name, payload in crop_payloads[:remaining]:
+            await asyncio.sleep(1.2)  # вежливая пауза между запросами к Яндексу
+            result = await cbir_search(payload, timeout=REVERSE_SEARCH_TIMEOUT)
+            passes.append({"name": pass_name, "ok": result["ok"], "error": result["error"], "sites": len(result["sites"]), "similar": len(result["similar"])})
+            all_candidates.extend(_candidates_from_pass(result, pass_name))
+            for tag in result.get("tags") or []:
+                if tag not in tags:
+                    tags.append(tag)
+            if result.get("captcha"):
+                captcha = True
+                break
+
+    lens = await lens_task
+    all_candidates.extend(lens.get("results") or [])
+
+    raw = dedupe(all_candidates, limit=240)
+    ranked = rank_candidates(raw, address, limit=FINAL_RESULTS)
+
+    payload = {
+        "enabled": True,
+        "results": ranked,
+        "raw_result_count": len(raw),
+        "passes": passes,
+        "engines": [{"engine": "Yandex Images", "ok": first["ok"], "error": first["error"]}, {"engine": lens["engine"], "ok": lens["ok"], "error": lens["error"]}],
+        "yandex_tags": tags,
+        "ocr_text": ocr_text,
+        "detected_objects": [{"category": c["category"], "area": round(c["area"], 3)} for c in crops_meta],
+        "captcha": captcha,
+        "elapsed_seconds": round(time.time() - started, 1),
+        "cached": False,
+    }
+    _CACHE[cache_key] = (time.time(), payload)
+    if len(_CACHE) > 64:
+        for key in sorted(_CACHE, key=lambda k: _CACHE[k][0])[:16]:
+            _CACHE.pop(key, None)
+    return payload
