@@ -63,8 +63,11 @@ function header(d){
     '<div class="place">'+esc(p.address)+'</div>'+
     (p.object?'<div class="muted" style="margin-top:4px">Совпал объект: '+esc(p.object)+'</div>':'')+
     '<div class="confidence matched">Визуальное совпадение подтверждено · '+pct(p.confidence)+'%</div></div>';
-  if(d.status==='visual_only') return '<div class="notice warning"><b>Здание подтверждено визуально, адрес — нет.</b>'+
-    '<div style="margin-top:6px" class="muted">Совпадение с найденными фотографиями надёжное, но адрес не удалось перепроверить по открытым данным. Выдавать непроверенный адрес за факт сервис не будет.</div></div>';
+  if(d.status==='visual_only'){
+    const guess=p&&p.address_guess?'<div class="place" style="font-size:18px">Предположительно: '+esc(p.address_guess)+'</div>':'';
+    return '<div class="notice warning"><b>Здание подтверждено визуально, адрес — нет.</b>'+guess+
+    '<div style="margin-top:6px" class="muted">Совпадение с найденными фотографиями надёжное, но улицу не подтвердил ни один независимый источник. Выдавать непроверенный адрес за факт сервис не будет — и не показывает по нему исторические фотографии.</div></div>';
+  }
   if(d.status==='verification_unavailable') return '<div class="notice error"><b>Проверка временно недоступна.</b>'+
     '<div style="margin-top:6px" class="muted">'+esc(d.message)+'</div></div>';
   return '<div class="notice warning"><b>Конкретное здание пока не подтверждено.</b>'+

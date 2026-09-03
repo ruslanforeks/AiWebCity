@@ -15,7 +15,7 @@ from .visual_compare import verify_candidates
 
 app = FastAPI(title="AiWebCity", version="1.2.0-recall")
 
-VISUAL_CHECK_LIMIT = int(os.getenv("VISUAL_CHECK_LIMIT", "14"))
+VISUAL_CHECK_LIMIT = int(os.getenv("VISUAL_CHECK_LIMIT", "8"))
 VISUAL_CONFIDENCE_THRESHOLD = float(os.getenv("VISUAL_CONFIDENCE_THRESHOLD", "0.72"))
 
 
@@ -142,16 +142,21 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
         user_address=address_hint,
     )
     location = resolved.get("location")
+    # Адрес засчитывается только при независимом подтверждении улицы. Иначе он
+    # остаётся предположением и не выдаётся как факт.
+    address_confirmed = bool(resolved.get("confirmed"))
 
     place = None
     if accepted:
         best = accepted[0]
         place = {
-            "address": resolved.get("address") or None,
-            "street": (location or {}).get("street"),
-            "house_number": (location or {}).get("house_number") or None,
-            "lat": (location or {}).get("lat"),
-            "lon": (location or {}).get("lon"),
+            "address": (resolved.get("address") or None) if address_confirmed else None,
+            "address_guess": (resolved.get("address") or None) if (location and not address_confirmed) else None,
+            "address_confirmed": address_confirmed,
+            "street": (location or {}).get("street") if address_confirmed else None,
+            "house_number": ((location or {}).get("house_number") or None) if address_confirmed else None,
+            "lat": (location or {}).get("lat") if address_confirmed else None,
+            "lon": (location or {}).get("lon") if address_confirmed else None,
             "confidence": float(best.get("confidence", 0.0)),
             "object": best.get("which_object") or None,
             "address_precision": (location or {}).get("precision"),
@@ -167,8 +172,10 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
         if item.get("image_url")
     ]
 
+    # Исторические фотографии ищем только вокруг ПОДТВЕРЖДЁННОГО адреса: по
+    # неподтверждённой догадке они могут оказаться снимками совсем другого места.
     historical: list[dict[str, Any]] = []
-    if location and location.get("lat") is not None:
+    if address_confirmed and location and location.get("lat") is not None:
         requested_year = extract_year(year) or 1999
         historical.extend(await pastvu_search(float(location["lat"]), float(location["lon"]), requested_year))
         queries = [
@@ -179,12 +186,18 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
         if queries:
             historical.extend(await wikimedia_search(queries, limit=12))
 
-    if accepted and location:
+    if accepted and address_confirmed:
         status, message = "identified", "Здание визуально подтверждено, затем независимо проверен его адрес."
+    elif accepted and location:
+        status, message = (
+            "visual_only",
+            f"Здание визуально подтверждено, но адрес не подтверждён независимо. "
+            f"Вероятный вариант — {resolved.get('address')} — сервис показывает как предположение, а не как факт.",
+        )
     elif accepted:
         status, message = (
             "visual_only",
-            "Здание визуально подтверждено на нескольких фотографиях, но точный адрес пока не подтверждён по открытым данным.",
+            "Здание визуально подтверждено на нескольких фотографиях, но определить его адрес по открытым данным не удалось.",
         )
     else:
         status, message = (
@@ -198,7 +211,7 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
         "place": place,
         "verification": {
             "visual_match": bool(accepted),
-            "address_verified": bool(location),
+            "address_verified": address_confirmed,
             "visual_matches": len(accepted),
             "checked": len(verifications),
         },
@@ -225,6 +238,8 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
             "visual_checks": len(verifications),
             "visual_errors": vision_errors[:5],
             "address_hypotheses": resolved.get("hypotheses"),
+            "address_confirmed": address_confirmed,
+            "address_guess": resolved.get("address") if not address_confirmed else None,
             "search_seconds": reverse_result.get("elapsed_seconds"),
             "cached_search": reverse_result.get("cached"),
         },
