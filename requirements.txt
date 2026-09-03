@@ -2,7 +2,13 @@ fastapi==0.115.12
 uvicorn[standard]==0.34.0
 httpx==0.28.1
 python-multipart==0.0.20
+python-dotenv==1.2.3
 Pillow>=12.0.0,<13
 lxml==6.0.3
-# PicImageSearch==3.12.11 is installed separately with --no-deps because its metadata
-# declares lxml<6, while Python 3.14 requires a newer lxml wheel on this server.
+# PicImageSearch нужен ТОЛЬКО для Google Lens и импортируется лениво:
+# поиск по Yandex работает через собственный клиент app/yandex_cbir.py.
+# Ставится отдельно с --no-deps, потому что его метаданные требуют lxml<6,
+# а на Python 3.14 нужен более новый wheel:
+#   pip install "lxml==6.0.3"
+#   pip install --no-deps "PicImageSearch==3.12.11"
+#   pip install "pyquery>=2.0.1" "cssselect>=1.5.0" "httpx[http2]>=0.28.1"

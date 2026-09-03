@@ -10,9 +10,13 @@ body{font-family:Inter,system-ui,sans-serif;background:#f5f6f8;color:#17191d;mar
 .field{margin-bottom:14px}.field label{display:block;font-weight:700;margin-bottom:7px}.field input{width:100%;box-sizing:border-box;padding:13px;border:1px solid #ddd;border-radius:12px;font:inherit}
 .upload{display:flex;min-height:180px;border:1.5px dashed #c6ccd6;border-radius:16px;align-items:center;justify-content:center;text-align:center;cursor:pointer}.upload input{display:none}
 .preview img{max-width:100%;max-height:320px;border-radius:14px;margin-top:12px}.button{padding:13px 18px;border:0;border-radius:12px;background:#1f6feb;color:white;font-weight:800;cursor:pointer}.button:disabled{opacity:.5}
-.muted{color:#6d7480}.notice{background:#f7f8fa;border:1px solid #e1e5ea;border-radius:12px;padding:12px}.success{background:#edf9f0;border-color:#bde4c8}.warning{background:#fff8e8;border-color:#efd99b}
-.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.item{border:1px solid #e3e6eb;border-radius:14px;overflow:hidden;background:#fff}.item img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;background:#eee}
-.place{font-size:22px;font-weight:850;margin-top:6px}.confidence{display:inline-block;padding:5px 9px;border-radius:999px;background:#edf1f5;font-size:12px;font-weight:800;margin-top:9px}.matched{background:#edf9f0}.section-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:24px}.count{font-size:13px;color:#6d7480;font-weight:700}
+.muted{color:#6d7480}.notice{background:#f7f8fa;border:1px solid #e1e5ea;border-radius:12px;padding:12px}.success{background:#edf9f0;border-color:#bde4c8}.warning{background:#fff8e8;border-color:#efd99b}.error{background:#fdefef;border-color:#f0c2c2}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.item{border:1px solid #e3e6eb;border-radius:14px;overflow:hidden;background:#fff;position:relative}.item img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;background:#eee}
+.badge{position:absolute;left:8px;top:8px;background:rgba(17,19,23,.82);color:#fff;font-size:11px;font-weight:800;padding:4px 7px;border-radius:999px}
+.year{position:absolute;right:8px;top:8px;background:rgba(255,255,255,.92);color:#17191d;font-size:11px;font-weight:800;padding:4px 7px;border-radius:999px}
+.place{font-size:22px;font-weight:850;margin-top:6px}.confidence{display:inline-block;padding:5px 9px;border-radius:999px;background:#edf1f5;font-size:12px;font-weight:800;margin-top:9px}.matched{background:#dff2e4}
+.section-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:24px}.count{font-size:13px;color:#6d7480;font-weight:700}
+.features{margin:8px 0 0;padding-left:18px;font-size:13px;color:#4b525c}.features li{margin:2px 0}
 @media(max-width:720px){.grid,.cards{grid-template-columns:1fr}}
 </style>
 </head>
@@ -35,22 +39,57 @@ body{font-family:Inter,system-ui,sans-serif;background:#f5f6f8;color:#17191d;mar
 <section id="result" class="card" style="display:none"></section>
 </main>
 <script>
-const form=document.getElementById('form'),photo=document.getElementById('photo'),previewImg=document.getElementById('previewImg'),submit=document.getElementById('submit'),status=document.getElementById('status'),result=document.getElementById('result');
+const form=document.getElementById('form'),photo=document.getElementById('photo'),previewImg=document.getElementById('previewImg'),
+      submit=document.getElementById('submit'),statusEl=document.getElementById('status'),result=document.getElementById('result');
 photo.onchange=()=>{const f=photo.files[0];if(f){previewImg.src=URL.createObjectURL(f);previewImg.style.display='block'}};
-const esc=s=>String(s??'').replace(/[&<>\\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\\':'&#92;','"':'&quot;'}[c]));
-function cards(items){if(!items?.length)return '<div class="notice">Фотографий не найдено.</div>';return '<div class="cards">'+items.map(x=>'<article class="item">'+(x.image_url?'<img loading="lazy" src="'+esc(x.image_url)+'" alt="" onerror="this.closest(\'.item\').remove()">':'')+'</article>').join('')+'</div>'}
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const pct=v=>Math.round((Number(v)||0)*100);
+
+function cards(items,opts={}){
+  if(!items?.length) return '<div class="notice">Фотографий не найдено.</div>';
+  return '<div class="cards">'+items.map(x=>{
+    if(!x.image_url) return '';
+    const badge=opts.showConfidence&&x.confidence!=null?'<span class="badge">'+pct(x.confidence)+'%</span>':'';
+    const year=x.year?'<span class="year">'+esc(x.year)+'</span>':'';
+    return '<article class="item">'+badge+year+
+      '<img loading="lazy" src="'+esc(x.image_url)+'" alt="" onerror="this.closest(\'.item\').remove()">'+
+    '</article>';
+  }).join('')+'</div>';
+}
+
+function header(d){
+  const p=d.place;
+  if(d.status==='identified'&&p) return '<div class="notice success"><div class="muted">Найденное место</div>'+
+    '<div class="place">'+esc(p.address)+'</div>'+
+    (p.object?'<div class="muted" style="margin-top:4px">Совпал объект: '+esc(p.object)+'</div>':'')+
+    '<div class="confidence matched">Визуальное совпадение подтверждено · '+pct(p.confidence)+'%</div></div>';
+  if(d.status==='visual_only') return '<div class="notice warning"><b>Здание подтверждено визуально, адрес — нет.</b>'+
+    '<div style="margin-top:6px" class="muted">Совпадение с найденными фотографиями надёжное, но адрес не удалось перепроверить по открытым данным. Выдавать непроверенный адрес за факт сервис не будет.</div></div>';
+  if(d.status==='verification_unavailable') return '<div class="notice error"><b>Проверка временно недоступна.</b>'+
+    '<div style="margin-top:6px" class="muted">'+esc(d.message)+'</div></div>';
+  return '<div class="notice warning"><b>Конкретное здание пока не подтверждено.</b>'+
+    '<div style="margin-top:6px" class="muted">Сервис нашёл кандидатов, но не стал выдавать сомнительное совпадение за результат.</div></div>';
+}
+
 form.onsubmit=async e=>{
- e.preventDefault();submit.disabled=true;status.textContent='Ищем реальные совпадения здания…';result.style.display='none';
- try{const r=await fetch('/api/identify',{method:'POST',body:new FormData(form)}),d=await r.json();if(!r.ok)throw new Error(d.detail||'Ошибка');
- const p=d.place;let top='';
- if(p){top='<div class="notice success"><div class="muted">Найденное место</div><div class="place">'+esc(p.address)+'</div><div class="confidence matched">Визуальное совпадение подтверждено · '+Math.round((p.confidence||0)*100)+'%</div></div>'}
- else{top='<div class="notice warning"><b>Конкретное здание пока не подтверждено.</b><div style="margin-top:6px" class="muted">Сервис нашёл кандидатов, но не стал выдавать сомнительное совпадение за результат.</div></div>'}
- const matched=d.matched_images||[];const candidates=d.candidate_images||[];const historical=d.historical_images||[];
- result.innerHTML='<h2>Результаты</h2>'+top+
- '<div class="section-title"><h3>'+(p?'Подтверждённые совпадения':'Кандидаты для проверки')+'</h3><span class="count">'+(p?matched.length:candidates.length)+' фото</span></div>'+cards(p?matched:candidates)+
- '<div class="section-title"><h3>Исторические фотографии</h3><span class="count">'+historical.length+' фото</span></div>'+cards(historical)+
- '<div class="notice" style="margin-top:20px">'+esc(d.message||'')+'</div>';
- result.style.display='block';status.textContent='Поиск завершён';window.scrollTo({top:result.offsetTop-12,behavior:'smooth'});
- }catch(err){status.textContent=err.message||'Ошибка'}finally{submit.disabled=false}
+  e.preventDefault();submit.disabled=true;statusEl.textContent='Ищем реальные совпадения здания…';result.style.display='none';
+  try{
+    const r=await fetch('/api/identify',{method:'POST',body:new FormData(form)});
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||'Ошибка');
+    const matched=d.matched_images||[],candidates=d.candidate_images||[],historical=d.historical_images||[];
+    const confirmed=matched.length>0;
+    const best=confirmed?matched[0]:null;
+    let html='<h2>Результаты</h2>'+header(d);
+    html+='<div class="section-title"><h3>'+(confirmed?'Подтверждённые совпадения':'Кандидаты для проверки')+'</h3>'+
+          '<span class="count">'+(confirmed?matched.length:candidates.length)+' фото</span></div>'+
+          cards(confirmed?matched:candidates,{showConfidence:confirmed});
+    if(best?.matching_features?.length)
+      html+='<ul class="features">'+best.matching_features.map(f=>'<li>'+esc(f)+'</li>').join('')+'</ul>';
+    html+='<div class="section-title"><h3>Исторические фотографии</h3><span class="count">'+historical.length+' фото</span></div>'+cards(historical);
+    html+='<div class="notice" style="margin-top:20px">'+esc(d.message||'')+'</div>';
+    result.innerHTML=html;result.style.display='block';statusEl.textContent='Поиск завершён';
+    window.scrollTo({top:result.offsetTop-12,behavior:'smooth'});
+  }catch(err){statusEl.textContent=err.message||'Ошибка'}finally{submit.disabled=false}
 };
 </script></body></html>
