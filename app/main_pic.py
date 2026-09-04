@@ -8,9 +8,10 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image
 
-from . import address_resolve
+from . import address_resolve, streets
 from .address_probe import probe_images
-from .main import MAX_UPLOAD_MB, STATIC_DIR, TIMEWEB_TOKEN, extract_year, norm_text, pastvu_search, wikimedia_search
+from .main import (MAX_UPLOAD_MB, STATIC_DIR, TIMEWEB_TOKEN, extract_year, norm_text,
+                   pastvu_search, wikimedia_geosearch, wikimedia_search)
 from .reverse_search import search as reverse_image_search
 from .visual_compare import verify_candidates
 
@@ -22,6 +23,11 @@ VISUAL_CONFIDENCE_THRESHOLD = float(os.getenv("VISUAL_CONFIDENCE_THRESHOLD", "0.
 # на адрес при этом сравнивать. Каждое сравнение — платный вызов Vision.
 ADDRESS_PROBE_LIMIT = int(os.getenv("ADDRESS_PROBE_LIMIT", "2"))
 ADDRESS_PROBE_IMAGES = int(os.getenv("ADDRESS_PROBE_IMAGES", "3"))
+# Радиусы архивного поиска. Ближний — фотографии самого здания, дальний — улицы
+# и квартала: по ним видно, как выглядело место, даже если дом не в кадре.
+HISTORY_BUILDING_RADIUS = int(os.getenv("HISTORY_BUILDING_RADIUS", "150"))
+HISTORY_STREET_RADIUS = int(os.getenv("HISTORY_STREET_RADIUS", "900"))
+HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "48"))
 
 
 def _dedupe_images(items: list[dict[str, Any]], limit: int = 24) -> list[dict[str, Any]]:
@@ -34,7 +40,7 @@ def _dedupe_images(items: list[dict[str, Any]], limit: int = 24) -> list[dict[st
         seen.add(url)
         result.append({
             key: item.get(key)
-            for key in ("image_url", "page_url", "year", "source", "kind", "distance_m")
+            for key in ("image_url", "page_url", "year", "source", "kind", "distance_m", "scope", "title")
             if item.get(key) is not None
         })
         if len(result) >= limit:
@@ -77,6 +83,12 @@ async def health() -> dict[str, Any]:
         "photo_persistence": False,
         "generation": False,
     }
+
+
+@app.get("/api/streets")
+async def street_suggestions(q: str = "", limit: int = 8) -> dict[str, Any]:
+    """Подсказки для поля адреса: улицы и реально существующие номера домов."""
+    return {"query": q, "suggestions": streets.suggest(q, limit=max(1, min(limit, 15)))}
 
 
 @app.post("/api/identify")
@@ -221,15 +233,38 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
     # неподтверждённой догадке они могут оказаться снимками совсем другого места.
     historical: list[dict[str, Any]] = []
     if address_confirmed and location and location.get("lat") is not None:
+        lat, lon = float(location["lat"]), float(location["lon"])
         requested_year = extract_year(year) or 1999
-        historical.extend(await pastvu_search(float(location["lat"]), float(location["lon"]), requested_year))
+
+        # Ближний радиус идёт первым, поэтому после дедупликации фотографии
+        # самого здания оказываются выше снимков квартала.
+        # scope говорит только о расстоянии до точки, а не о том, что здание есть
+        # в кадре: проверять это должна визуальная сверка, её здесь ещё нет.
+        near = await pastvu_search(lat, lon, requested_year, distance=HISTORY_BUILDING_RADIUS)
+        far = await pastvu_search(lat, lon, requested_year, distance=HISTORY_STREET_RADIUS)
+        for item in near:
+            item["scope"] = "building"
+        for item in far:
+            item.setdefault("scope", "street")
+        historical.extend(near)
+        historical.extend(far)
+
+        geo_photos = await wikimedia_geosearch(lat, lon, radius=HISTORY_STREET_RADIUS, limit=20)
+        for item in geo_photos:
+            item["scope"] = "street"
+        historical.extend(geo_photos)
+
         queries = [
             f"Новороссийск {norm_text(resolved.get('address'))}",
             f"Новороссийск {norm_text(location.get('street'))}",
+            f"Novorossiysk {norm_text(location.get('street'))}",
         ]
-        queries = list(dict.fromkeys(q for q in queries if q.strip() != "Новороссийск"))
+        queries = list(dict.fromkeys(q for q in queries if q.strip() not in {"Новороссийск", "Novorossiysk"}))
         if queries:
-            historical.extend(await wikimedia_search(queries, limit=12))
+            text_photos = await wikimedia_search(queries, limit=16)
+            for item in text_photos:
+                item["scope"] = "street"
+            historical.extend(text_photos)
 
     if accepted and address_confirmed:
         probed_ok = "address_probe" in ((location or {}).get("sources") or [])
@@ -273,7 +308,7 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
             if item.get("image_url") or item.get("thumb_url")
         ],
         "matched_images": matched_images,
-        "historical_images": _dedupe_images(historical, 24),
+        "historical_images": _dedupe_images(historical, HISTORY_LIMIT),
         "message": message,
         "privacy": {
             "server_storage": False,

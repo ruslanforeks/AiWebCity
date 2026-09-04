@@ -304,6 +304,46 @@ async def wikimedia_search(queries: list[str], limit: int = 12) -> list[dict[str
     return list(merged.values())[:limit]
 
 
+async def wikimedia_geosearch(lat: float, lon: float, *, radius: int = 800, limit: int = 20) -> list[dict[str, Any]]:
+    """Фотографии Commons вокруг точки. Текстовый поиск находит далеко не всё,
+    а геопоиск достаёт снимки, привязанные к координатам."""
+    params = {
+        "action": "query", "generator": "geosearch", "ggscoord": f"{lat}|{lon}",
+        "ggsradius": max(10, min(10000, radius)), "ggslimit": min(limit, 50), "ggsnamespace": 6,
+        "prop": "imageinfo|info", "inprop": "url", "iiprop": "url|extmetadata",
+        "iiurlwidth": 900, "format": "json", "formatversion": 2,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT}) as client:
+            response = await client.get(WIKIMEDIA_API_URL, params=params)
+        if response.status_code >= 400:
+            return []
+        pages = response.json().get("query", {}).get("pages", [])
+    except (httpx.HTTPError, ValueError, json.JSONDecodeError):
+        return []
+
+    out = []
+    for page in pages:
+        info = (page.get("imageinfo") or [{}])[0]
+        image_url = norm_text(info.get("thumburl") or info.get("url"))
+        if not image_url:
+            continue
+        title = norm_text(page.get("title"))
+        extra = info.get("extmetadata") or {}
+        description = re.sub(r"<[^>]+>", " ", norm_text((extra.get("ImageDescription") or {}).get("value")))
+        date_text = norm_text((extra.get("DateTimeOriginal") or {}).get("value"))
+        out.append({
+            "image_url": image_url,
+            "page_url": norm_text(page.get("canonicalurl")) or "https://commons.wikimedia.org/",
+            "title": title or "Wikimedia Commons",
+            "description": description,
+            "source": "Wikimedia Commons",
+            "kind": "historical",
+            "year": extract_year(f"{date_text} {title} {description}"),
+        })
+    return out
+
+
 def build_pastphoto_link(address: str) -> str:
     return f"{PASTPHOTO_BASE}{quote(norm_text(address).replace(', Россия', ''), safe='')}"
 

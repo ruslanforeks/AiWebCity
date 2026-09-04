@@ -7,14 +7,29 @@
 <style>
 body{font-family:Inter,system-ui,sans-serif;background:#f5f6f8;color:#17191d;margin:0}.wrap{max-width:1050px;margin:auto;padding:28px 16px}
 .card{background:#fff;border:1px solid #e3e6eb;border-radius:20px;padding:20px;margin:18px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.field{margin-bottom:14px}.field label{display:block;font-weight:700;margin-bottom:7px}.field input{width:100%;box-sizing:border-box;padding:13px;border:1px solid #ddd;border-radius:12px;font:inherit}
+.field{margin-bottom:14px;position:relative}.field label{display:block;font-weight:700;margin-bottom:7px}
+.field input{width:100%;box-sizing:border-box;padding:13px;border:1px solid #ddd;border-radius:12px;font:inherit}
+.field input:focus{outline:none;border-color:#1f6feb;box-shadow:0 0 0 3px rgba(31,111,235,.12)}
+.hint{font-size:12.5px;color:#6d7480;margin-top:6px}.hint b{color:#1f6feb}
+.ac{position:absolute;z-index:20;left:0;right:0;top:100%;margin-top:4px;background:#fff;border:1px solid #dde1e7;border-radius:12px;box-shadow:0 10px 28px rgba(16,20,28,.13);overflow:hidden;max-height:270px;overflow-y:auto}
+.ac div{padding:10px 13px;cursor:pointer;font-size:14.5px;display:flex;justify-content:space-between;gap:10px}
+.ac div:hover,.ac div.on{background:#eef4ff}.ac .sub{color:#8b929c;font-size:12px;flex-shrink:0}
 .upload{display:flex;min-height:180px;border:1.5px dashed #c6ccd6;border-radius:16px;align-items:center;justify-content:center;text-align:center;cursor:pointer}.upload input{display:none}
-.preview img{max-width:100%;max-height:320px;border-radius:14px;margin-top:12px}.button{padding:13px 18px;border:0;border-radius:12px;background:#1f6feb;color:white;font-weight:800;cursor:pointer}.button:disabled{opacity:.5}
-.muted{color:#6d7480}.notice{background:#f7f8fa;border:1px solid #e1e5ea;border-radius:12px;padding:12px}.success{background:#edf9f0;border-color:#bde4c8}.warning{background:#fff8e8;border-color:#efd99b}.error{background:#fdefef;border-color:#f0c2c2}
-.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.item{border:1px solid #e3e6eb;border-radius:14px;overflow:hidden;background:#fff;position:relative}.item img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;background:#eee}
+.preview img{max-width:100%;max-height:320px;border-radius:14px;margin-top:12px}
+.button{padding:13px 18px;border:0;border-radius:12px;background:#1f6feb;color:white;font-weight:800;cursor:pointer}.button:disabled{opacity:.5}
+.muted{color:#6d7480}.notice{background:#f7f8fa;border:1px solid #e1e5ea;border-radius:12px;padding:12px}
+.success{background:#edf9f0;border-color:#bde4c8}.warning{background:#fff8e8;border-color:#efd99b}.error{background:#fdefef;border-color:#f0c2c2}
+.ask{background:#eef4ff;border:1px solid #c3d7fb;border-radius:14px;padding:14px 16px;margin-top:14px}
+.ask b{display:block;margin-bottom:4px}.ask .button{margin-top:10px;padding:10px 15px}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.item{border:1px solid #e3e6eb;border-radius:14px;overflow:hidden;background:#fff;position:relative}
+.item img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;background:#eee}
 .badge{position:absolute;left:8px;top:8px;background:rgba(17,19,23,.82);color:#fff;font-size:11px;font-weight:800;padding:4px 7px;border-radius:999px}
 .year{position:absolute;right:8px;top:8px;background:rgba(255,255,255,.92);color:#17191d;font-size:11px;font-weight:800;padding:4px 7px;border-radius:999px}
-.place{font-size:22px;font-weight:850;margin-top:6px}.confidence{display:inline-block;padding:5px 9px;border-radius:999px;background:#edf1f5;font-size:12px;font-weight:800;margin-top:9px}.matched{background:#dff2e4}
+.scope{position:absolute;left:8px;bottom:8px;background:rgba(31,111,235,.9);color:#fff;font-size:10.5px;font-weight:800;padding:3px 7px;border-radius:999px}
+.scope.street{background:rgba(109,116,128,.9)}
+.place{font-size:22px;font-weight:850;margin-top:6px}
+.confidence{display:inline-block;padding:5px 9px;border-radius:999px;background:#edf1f5;font-size:12px;font-weight:800;margin-top:9px}.matched{background:#dff2e4}
 .section-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:24px}.count{font-size:13px;color:#6d7480;font-weight:700}
 .features{margin:8px 0 0;padding-left:18px;font-size:13px;color:#4b525c}.features li{margin:2px 0}
 @media(max-width:720px){.grid,.cards{grid-template-columns:1fr}}
@@ -26,7 +41,11 @@ body{font-family:Inter,system-ui,sans-serif;background:#f5f6f8;color:#17191d;mar
 <p class="muted">Фото → реальные визуальные совпадения → проверка адреса → исторические фотографии. Только Новороссийск.</p>
 <section class="card">
 <form id="form"><div class="grid"><div>
-<div class="field"><label>Адрес или улица-подсказка <span class="muted">(необязательно)</span></label><input name="address" placeholder="ул. Советов, 15"></div>
+<div class="field">
+  <label>Адрес или улица-подсказка <span class="muted">(необязательно)</span></label>
+  <input name="address" id="address" placeholder="начните вводить: куникова 43" autocomplete="off">
+  <div class="hint">Введённый адрес <b>заметно повышает точность</b>: сервис ищет фотографии по этому адресу и сверяет их с вашим снимком.</div>
+</div>
 <div class="field"><label>Исторический период <span class="muted">(необязательно)</span></label><input name="year" placeholder="1913 или 1900–1940"></div>
 <div class="notice">Адрес не считается правильным автоматически. Сначала сервис ищет совпадение здания по фотографиям, и только потом проверяет адрес найденного кандидата.</div>
 <div class="notice" style="margin-top:10px">Фото не сохраняется на VPS. Оно временно используется внешним поиском и AI.</div>
@@ -40,22 +59,67 @@ body{font-family:Inter,system-ui,sans-serif;background:#f5f6f8;color:#17191d;mar
 </main>
 <script>
 const form=document.getElementById('form'),photo=document.getElementById('photo'),previewImg=document.getElementById('previewImg'),
-      submit=document.getElementById('submit'),statusEl=document.getElementById('status'),result=document.getElementById('result');
+      submit=document.getElementById('submit'),statusEl=document.getElementById('status'),result=document.getElementById('result'),
+      addressEl=document.getElementById('address');
 photo.onchange=()=>{const f=photo.files[0];if(f){previewImg.src=URL.createObjectURL(f);previewImg.style.display='block'}};
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const pct=v=>Math.round((Number(v)||0)*100);
 
+/* ---------- подсказки адреса ---------- */
+let acBox=null, acItems=[], acIndex=-1, acTimer=null;
+function closeAc(){ if(acBox){acBox.remove();acBox=null;} acItems=[];acIndex=-1; }
+function renderAc(items){
+  closeAc(); if(!items.length) return;
+  acItems=items; acBox=document.createElement('div'); acBox.className='ac';
+  acBox.innerHTML=items.map((it,i)=>
+    '<div data-i="'+i+'">'+esc(it.value)+(it.houses?'<span class="sub">'+esc(it.houses)+' домов</span>':'')+'</div>').join('');
+  acBox.onmousedown=e=>{ const el=e.target.closest('[data-i]'); if(!el)return; e.preventDefault(); pick(+el.dataset.i); };
+  addressEl.parentNode.appendChild(acBox);
+}
+function pick(i){ const it=acItems[i]; if(!it)return; addressEl.value=it.value; closeAc(); if(!it.house) fetchAc(); }
+function mark(){ if(!acBox)return; [...acBox.children].forEach((c,i)=>c.classList.toggle('on',i===acIndex)); }
+async function fetchAc(){
+  const q=addressEl.value.trim(); if(q.length<2){closeAc();return;}
+  try{ const r=await fetch('/api/streets?q='+encodeURIComponent(q)); const d=await r.json();
+       if(document.activeElement===addressEl) renderAc(d.suggestions||[]); }catch(e){}
+}
+addressEl.addEventListener('input',()=>{clearTimeout(acTimer);acTimer=setTimeout(fetchAc,140)});
+addressEl.addEventListener('focus',fetchAc);
+addressEl.addEventListener('blur',()=>setTimeout(closeAc,120));
+addressEl.addEventListener('keydown',e=>{
+  if(!acBox)return;
+  if(e.key==='ArrowDown'){e.preventDefault();acIndex=Math.min(acIndex+1,acItems.length-1);mark();}
+  else if(e.key==='ArrowUp'){e.preventDefault();acIndex=Math.max(acIndex-1,0);mark();}
+  else if(e.key==='Enter'&&acIndex>=0){e.preventDefault();pick(acIndex);}
+  else if(e.key==='Escape'){closeAc();}
+});
+
+/* ---------- вывод результата ---------- */
 function cards(items,opts={}){
   if(!items?.length) return '<div class="notice">Фотографий не найдено.</div>';
   return '<div class="cards">'+items.map(x=>{
     if(!x.image_url) return '';
     const badge=opts.showConfidence&&x.confidence!=null?'<span class="badge">'+pct(x.confidence)+'%</span>':'';
     const year=x.year?'<span class="year">'+esc(x.year)+'</span>':'';
-    return '<article class="item">'+badge+year+
+    const scope=opts.showScope&&x.scope?'<span class="scope'+(x.scope==='street'?' street':'')+'">'+
+      (x.scope==='building'?'рядом с домом':'этот квартал')+'</span>':'';
+    return '<article class="item">'+badge+year+scope+
       '<img loading="lazy" src="'+esc(x.image_url)+'" alt="" onerror="this.closest(\'.item\').remove()">'+
     '</article>';
   }).join('')+'</div>';
 }
+
+function askForAddress(d){
+  if(d.status==='identified') return '';
+  const filled=addressEl.value.trim().length>0;
+  return '<div class="ask"><b>'+(filled
+      ? 'Уточните адрес — и сервис проверит его по фотографиям'
+      : 'Подскажите адрес, и точность заметно вырастет')+'</b>'+
+    '<span class="muted">Сервис найдёт снимки по этому адресу и сверит их с вашим фото. Это единственный способ '+
+    'подтвердить место, когда подписи найденных фотографий адрес не называют.</span>'+
+    '<div><button type="button" class="button" onclick="focusAddress()">Ввести адрес</button></div></div>';
+}
+function focusAddress(){ addressEl.focus(); addressEl.scrollIntoView({block:'center',behavior:'smooth'}); }
 
 function header(d){
   const p=d.place;
@@ -75,7 +139,8 @@ function header(d){
 }
 
 form.onsubmit=async e=>{
-  e.preventDefault();submit.disabled=true;statusEl.textContent='Ищем реальные совпадения здания…';result.style.display='none';
+  e.preventDefault();closeAc();submit.disabled=true;
+  statusEl.textContent='Ищем реальные совпадения здания…';result.style.display='none';
   try{
     const r=await fetch('/api/identify',{method:'POST',body:new FormData(form)});
     const d=await r.json();
@@ -83,13 +148,15 @@ form.onsubmit=async e=>{
     const matched=d.matched_images||[],candidates=d.candidate_images||[],historical=d.historical_images||[];
     const confirmed=matched.length>0;
     const best=confirmed?matched[0]:null;
-    let html='<h2>Результаты</h2>'+header(d);
+    const building=historical.filter(x=>x.scope==='building').length;
+    let html='<h2>Результаты</h2>'+header(d)+askForAddress(d);
     html+='<div class="section-title"><h3>'+(confirmed?'Подтверждённые совпадения':'Кандидаты для проверки')+'</h3>'+
           '<span class="count">'+(confirmed?matched.length:candidates.length)+' фото</span></div>'+
           cards(confirmed?matched:candidates,{showConfidence:confirmed});
     if(best?.matching_features?.length)
       html+='<ul class="features">'+best.matching_features.map(f=>'<li>'+esc(f)+'</li>').join('')+'</ul>';
-    html+='<div class="section-title"><h3>Исторические фотографии</h3><span class="count">'+historical.length+' фото</span></div>'+cards(historical);
+    html+='<div class="section-title"><h3>Исторические фотографии</h3><span class="count">'+historical.length+' фото'+
+          (building?' · '+building+' рядом с домом':'')+'</span></div>'+cards(historical,{showScope:true});
     html+='<div class="notice" style="margin-top:20px">'+esc(d.message||'')+'</div>';
     result.innerHTML=html;result.style.display='block';statusEl.textContent='Поиск завершён';
     window.scrollTo({top:result.offsetTop-12,behavior:'smooth'});
