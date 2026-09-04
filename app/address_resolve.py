@@ -313,6 +313,41 @@ async def geocode_candidates(rows: list[dict[str, Any]], place_names: list[str])
     return None
 
 
+async def geocode_single(street: str, house: str) -> dict[str, Any] | None:
+    """Геокодирует одну пару «улица+дом». Нужно для проверки адреса поиском."""
+    street = norm_text(street)
+    house = norm_text(house)
+    if not street:
+        return None
+    query = f"{street} {house}, {CITY}, Россия" if house else f"{street}, {CITY}, Россия"
+    async with httpx.AsyncClient(timeout=20, headers=NOMINATIM_HEADERS) as client:
+        for entry in await _nominatim(client, query):
+            display = norm_text(entry.get("display_name"))
+            if not _is_novorossiysk(display):
+                continue
+            address = entry.get("address") if isinstance(entry.get("address"), dict) else {}
+            found_street = norm_text(address.get("road") or address.get("pedestrian") or address.get("residential"))
+            found_house = norm_text(address.get("house_number"))
+            if not found_street:
+                continue
+            return {
+                "lat": float(entry["lat"]),
+                "lon": float(entry["lon"]),
+                "display_name": display,
+                "street": found_street,
+                "house_number": found_house or house,
+                "house_number_verified": bool(found_house),
+                "matched_hypothesis": f"{street} {house}".strip(),
+                "precision": "house" if found_house else "street",
+                "street_corroborated": True,
+                "house_corroborated": True,
+                "sources": ["address_probe"],
+                "evidence": [],
+                "independent_candidates": 0,
+            }
+    return None
+
+
 def pretty_address(location: dict[str, Any] | None) -> str:
     if not location:
         return ""

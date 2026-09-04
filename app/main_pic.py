@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from PIL import Image
 
 from . import address_resolve
+from .address_probe import probe_images
 from .main import MAX_UPLOAD_MB, STATIC_DIR, TIMEWEB_TOKEN, extract_year, norm_text, pastvu_search, wikimedia_search
 from .reverse_search import search as reverse_image_search
 from .visual_compare import verify_candidates
@@ -17,6 +18,10 @@ app = FastAPI(title="AiWebCity", version="1.2.0-recall")
 
 VISUAL_CHECK_LIMIT = int(os.getenv("VISUAL_CHECK_LIMIT", "8"))
 VISUAL_CONFIDENCE_THRESHOLD = float(os.getenv("VISUAL_CONFIDENCE_THRESHOLD", "0.72"))
+# Сколько адресов-гипотез проверять поиском картинок по адресу и сколько фотографий
+# на адрес при этом сравнивать. Каждое сравнение — платный вызов Vision.
+ADDRESS_PROBE_LIMIT = int(os.getenv("ADDRESS_PROBE_LIMIT", "2"))
+ADDRESS_PROBE_IMAGES = int(os.getenv("ADDRESS_PROBE_IMAGES", "3"))
 
 
 def _dedupe_images(items: list[dict[str, Any]], limit: int = 24) -> list[dict[str, Any]]:
@@ -142,6 +147,46 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
         user_address=address_hint,
     )
     location = resolved.get("location")
+    probe_report: list[dict[str, Any]] = []
+
+    # Подписи страниц могут вообще не называть улицу — так было на ул. Куникова, 43,
+    # где все найденные фотографии были правильные, а адреса в подписях не оказалось.
+    # Тогда идём с другой стороны: ищем фотографии ПО АДРЕСУ и сравниваем их с фото
+    # пользователя. Совпало — адрес доказан изображением, а не чужим текстом.
+    if accepted and not resolved.get("confirmed"):
+        targets: list[tuple[str, str, str]] = []
+        for street, house in address_resolve.parse_user_hint(address_hint)[:1]:
+            targets.append((street, house, "user_hint"))
+        for hypothesis in (resolved.get("hypotheses") or []):
+            pair = (hypothesis["street"], hypothesis["house"])
+            if pair not in {(t[0], t[1]) for t in targets}:
+                targets.append((pair[0], pair[1], "hypothesis"))
+
+        for street, house, origin in targets[:ADDRESS_PROBE_LIMIT]:
+            reference = await probe_images(street, house, limit=ADDRESS_PROBE_IMAGES + 1)
+            if not reference:
+                probe_report.append({"address": f"{street} {house}".strip(), "origin": origin, "images": 0, "matched": 0})
+                continue
+            checks = await verify_candidates(raw, content_type, reference, limit=ADDRESS_PROBE_IMAGES)
+            matched = [
+                item for item in checks
+                if item.get("same_place") and float(item.get("confidence", 0.0)) >= VISUAL_CONFIDENCE_THRESHOLD
+            ]
+            probe_report.append({
+                "address": f"{street} {house}".strip(), "origin": origin,
+                "images": len(reference), "matched": len(matched),
+            })
+            if matched:
+                probed = await address_resolve.geocode_single(street, house)
+                if probed:
+                    probed["sources"] = ["address_probe", origin]
+                    probed["evidence"] = [item.get("reason") for item in matched[:2] if item.get("reason")]
+                    location = probed
+                    resolved["location"] = probed
+                    resolved["address"] = address_resolve.pretty_address(probed)
+                    resolved["confirmed"] = True
+                    accepted.extend(matched)
+                    break
     # Адрес засчитывается только при независимом подтверждении улицы. Иначе он
     # остаётся предположением и не выдаётся как факт.
     address_confirmed = bool(resolved.get("confirmed"))
@@ -187,7 +232,14 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
             historical.extend(await wikimedia_search(queries, limit=12))
 
     if accepted and address_confirmed:
-        status, message = "identified", "Здание визуально подтверждено, затем независимо проверен его адрес."
+        probed_ok = "address_probe" in ((location or {}).get("sources") or [])
+        status = "identified"
+        message = (
+            "Здание визуально подтверждено. Адрес проверен встречным поиском: фотографии по этому адресу "
+            "показывают то же самое здание."
+            if probed_ok else
+            "Здание визуально подтверждено, затем независимо проверен его адрес."
+        )
     elif accepted and location:
         status, message = (
             "visual_only",
@@ -238,6 +290,7 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
             "visual_checks": len(verifications),
             "visual_errors": vision_errors[:5],
             "address_hypotheses": resolved.get("hypotheses"),
+            "address_probe": probe_report,
             "address_confirmed": address_confirmed,
             "address_guess": resolved.get("address") if not address_confirmed else None,
             "search_seconds": reverse_result.get("elapsed_seconds"),
