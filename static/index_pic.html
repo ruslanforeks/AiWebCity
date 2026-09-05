@@ -138,13 +138,34 @@ function header(d){
     '<div style="margin-top:6px" class="muted">Сервис нашёл кандидатов, но не стал выдавать сомнительное совпадение за результат.</div></div>';
 }
 
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+/* Распознавание идёт десятки секунд, поэтому сервер отдаёт номер задачи,
+   а мы опрашиваем её статус. Так браузер не обрывает запрос по таймауту
+   и видно, что происходит прямо сейчас. */
+async function runIdentify(formData){
+  const start=await fetch('/api/identify',{method:'POST',body:formData});
+  const started=await start.json();
+  if(!start.ok) throw new Error(started.detail||'Ошибка');
+  const jobId=started.job_id;
+  for(let i=0;i<400;i++){
+    await sleep(1500);
+    let job;
+    try{ const r=await fetch('/api/identify/'+jobId); job=await r.json();
+         if(!r.ok) throw new Error(job.detail||'Задача потеряна'); }
+    catch(e){ continue; }            // одна неудачная проверка — не повод сдаваться
+    if(job.stage) statusEl.textContent=job.stage+'…';
+    if(job.status==='done') return job.result;
+    if(job.status==='error') throw new Error(job.error||'Ошибка обработки');
+  }
+  throw new Error('Слишком долго — попробуйте ещё раз');
+}
+
 form.onsubmit=async e=>{
   e.preventDefault();closeAc();submit.disabled=true;
-  statusEl.textContent='Ищем реальные совпадения здания…';result.style.display='none';
+  statusEl.textContent='Начинаем поиск…';result.style.display='none';
   try{
-    const r=await fetch('/api/identify',{method:'POST',body:new FormData(form)});
-    const d=await r.json();
-    if(!r.ok) throw new Error(d.detail||'Ошибка');
+    const d=await runIdentify(new FormData(form));
     const matched=d.matched_images||[],candidates=d.candidate_images||[],historical=d.historical_images||[];
     const confirmed=matched.length>0;
     const best=confirmed?matched[0]:null;

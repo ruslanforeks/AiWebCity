@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import io
 import os
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image
 
-from . import address_resolve, streets
-from .address_probe import probe_images
+from . import address_resolve, jobs, streets
+from .address_probe import place_name_from_title, probe_by_name, probe_images
 from .main import (MAX_UPLOAD_MB, STATIC_DIR, TIMEWEB_TOKEN, extract_year, norm_text,
                    pastvu_search, wikimedia_geosearch, wikimedia_search)
 from .reverse_search import search as reverse_image_search
@@ -23,6 +23,9 @@ VISUAL_CONFIDENCE_THRESHOLD = float(os.getenv("VISUAL_CONFIDENCE_THRESHOLD", "0.
 # на адрес при этом сравнивать. Каждое сравнение — платный вызов Vision.
 ADDRESS_PROBE_LIMIT = int(os.getenv("ADDRESS_PROBE_LIMIT", "2"))
 ADDRESS_PROBE_IMAGES = int(os.getenv("ADDRESS_PROBE_IMAGES", "3"))
+# Проверка по названию объекта — запасной путь, когда адреса нет ни в подписях,
+# ни в подсказках. Названия берутся из подписей подтверждённых фотографий.
+NAME_PROBE_LIMIT = int(os.getenv("NAME_PROBE_LIMIT", "2"))
 # Радиусы архивного поиска. Ближний — фотографии самого здания, дальний — улицы
 # и квартала: по ним видно, как выглядело место, даже если дом не в кадре.
 HISTORY_BUILDING_RADIUS = int(os.getenv("HISTORY_BUILDING_RADIUS", "150"))
@@ -91,20 +94,15 @@ async def street_suggestions(q: str = "", limit: int = 8) -> dict[str, Any]:
     return {"query": q, "suggestions": streets.suggest(q, limit=max(1, min(limit, 15)))}
 
 
-@app.post("/api/identify")
-async def identify(photo: UploadFile = File(...), address: str = Form(""), year: str = Form("")) -> dict[str, Any]:
-    raw = await photo.read()
-    if len(raw) > MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(413, f"Фото слишком большое. Максимум {MAX_UPLOAD_MB} МБ.")
-    content_type = photo.content_type or "image/jpeg"
-    if content_type not in {"image/jpeg", "image/png", "image/webp"}:
-        raise HTTPException(400, "Поддерживаются JPG, PNG и WEBP.")
-    try:
-        Image.open(io.BytesIO(raw)).verify()
-    except Exception as exc:
-        raise HTTPException(400, "Не удалось прочитать изображение.") from exc
-
-    address_hint = norm_text(address)
+async def run_identification(
+    raw: bytes,
+    content_type: str,
+    address_hint: str,
+    year: str,
+    stage: Callable[[str], None] = lambda _: None,
+) -> dict[str, Any]:
+    """Весь пайплайн распознавания. `stage` сообщает, что происходит сейчас."""
+    stage("Ищем похожие фотографии в поиске")
     reverse_result = await reverse_image_search(raw, address=address_hint)
     candidates = reverse_result.get("results", [])
     yandex_tags = reverse_result.get("yandex_tags", [])
@@ -121,6 +119,7 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
             debug={"passes": reverse_result.get("passes"), "elapsed_seconds": reverse_result.get("elapsed_seconds")},
         )
 
+    stage(f"Сверяем здание на {min(len(candidates), VISUAL_CHECK_LIMIT)} фотографиях")
     verifications = await verify_candidates(raw, content_type, candidates, limit=VISUAL_CHECK_LIMIT)
 
     # Если Vision вообще не отвечает (кончился лимит, упал шлюз), это НЕ то же
@@ -152,6 +151,7 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
         if item.get("same_place") and float(item.get("confidence", 0.0)) >= VISUAL_CONFIDENCE_THRESHOLD
     ]
 
+    stage("Проверяем адрес")
     resolved = await address_resolve.resolve(
         verified_candidates=accepted,
         yandex_tags=yandex_tags,
@@ -175,6 +175,7 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
                 targets.append((pair[0], pair[1], "hypothesis"))
 
         for street, house, origin in targets[:ADDRESS_PROBE_LIMIT]:
+            stage(f"Ищем фотографии по адресу: {street} {house}".strip())
             reference = await probe_images(street, house, limit=ADDRESS_PROBE_IMAGES + 1)
             if not reference:
                 probe_report.append({"address": f"{street} {house}".strip(), "origin": origin, "images": 0, "matched": 0})
@@ -199,6 +200,71 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
                     resolved["confirmed"] = True
                     accepted.extend(matched)
                     break
+
+    # Адреса в подписях может не быть вовсе, а название объекта — есть: «Атэк»,
+    # «Новороссийский медицинский колледж». Ищем фотографии по названию и так же
+    # сверяем их с фото пользователя, а адрес берём уже у найденного объекта.
+    if accepted and not resolved.get("confirmed"):
+        names: list[str] = []
+        for candidate in accepted[:6]:
+            name = place_name_from_title(norm_text(candidate.get("title")))
+            if name and name.lower() not in {n.lower() for n in names}:
+                names.append(name)
+        for name in address_resolve.extract_place_names(yandex_tags):
+            if name and name.lower() not in {n.lower() for n in names}:
+                names.append(name)
+
+        for name in names[:NAME_PROBE_LIMIT]:
+            stage(f"Проверяем объект: {name}")
+            reference = await probe_by_name(name, limit=ADDRESS_PROBE_IMAGES + 1)
+            if not reference:
+                probe_report.append({"address": name, "origin": "place_name", "images": 0, "matched": 0})
+                continue
+            checks = await verify_candidates(raw, content_type, reference, limit=ADDRESS_PROBE_IMAGES)
+            matched = [
+                item for item in checks
+                if item.get("same_place") and float(item.get("confidence", 0.0)) >= VISUAL_CONFIDENCE_THRESHOLD
+            ]
+            probe_report.append({"address": name, "origin": "place_name", "images": len(reference), "matched": len(matched)})
+            if not matched:
+                continue
+            accepted.extend(matched)
+
+            # Адрес берём НЕ у названия, а из подписей тех самых фотографий,
+            # которые визуально совпали. Геокодирование по названию промахивается:
+            # «Новороссийский медицинский колледж» OpenStreetMap отдаёт на улице
+            # Видова, тогда как нужное здание стоит на Свободы, 23 — у организации
+            # несколько площадок.
+            probed = None
+            for item in matched:
+                text = " ".join(norm_text(item.get(k)) for k in ("title", "description", "page_url"))
+                for street_found, house_found in address_resolve.extract_street_house(text):
+                    probed = await address_resolve.geocode_single(street_found, house_found)
+                    if probed:
+                        probed["sources"] = ["name_probe", "matched_caption"]
+                        probed["evidence"] = [name, text[:160]]
+                        break
+                if probed:
+                    break
+
+            if probed:
+                location = probed
+                resolved["location"] = probed
+                resolved["address"] = address_resolve.pretty_address(probed)
+                resolved["confirmed"] = True
+                break
+
+            # Ни в одной совпавшей подписи адреса нет. Объект узнан, но какая
+            # именно его площадка на фотографии — неизвестно, поэтому адрес
+            # остаётся предположением.
+            fallback = await address_resolve.geocode_place(name)
+            if fallback and not location:
+                fallback["sources"] = ["name_probe"]
+                fallback["street_corroborated"] = False
+                location = fallback
+                resolved["location"] = fallback
+                resolved["address"] = address_resolve.pretty_address(fallback)
+                resolved["confirmed"] = False
     # Адрес засчитывается только при независимом подтверждении улицы. Иначе он
     # остаётся предположением и не выдаётся как факт.
     address_confirmed = bool(resolved.get("confirmed"))
@@ -233,6 +299,7 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
     # неподтверждённой догадке они могут оказаться снимками совсем другого места.
     historical: list[dict[str, Any]] = []
     if address_confirmed and location and location.get("lat") is not None:
+        stage("Ищем архивные фотографии")
         lat, lon = float(location["lat"]), float(location["lon"])
         requested_year = extract_year(year) or 1999
 
@@ -267,7 +334,8 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
             historical.extend(text_photos)
 
     if accepted and address_confirmed:
-        probed_ok = "address_probe" in ((location or {}).get("sources") or [])
+        location_sources = (location or {}).get("sources") or []
+        probed_ok = "address_probe" in location_sources or "name_probe" in location_sources
         status = "identified"
         message = (
             "Здание визуально подтверждено. Адрес проверен встречным поиском: фотографии по этому адресу "
@@ -332,3 +400,45 @@ async def identify(photo: UploadFile = File(...), address: str = Form(""), year:
             "cached_search": reverse_result.get("cached"),
         },
     }
+
+
+def _validate_upload(raw: bytes, content_type: str) -> None:
+    if len(raw) > MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(413, f"Фото слишком большое. Максимум {MAX_UPLOAD_MB} МБ.")
+    if content_type not in {"image/jpeg", "image/png", "image/webp"}:
+        raise HTTPException(400, "Поддерживаются JPG, PNG и WEBP.")
+    try:
+        Image.open(io.BytesIO(raw)).verify()
+    except Exception as exc:
+        raise HTTPException(400, "Не удалось прочитать изображение.") from exc
+
+
+@app.post("/api/identify")
+async def identify(photo: UploadFile = File(...), address: str = Form(""), year: str = Form("")) -> dict[str, Any]:
+    """Запускает распознавание фоном и сразу отдаёт идентификатор задачи.
+
+    Раньше ответ ждали в одном запросе, а он идёт десятки секунд: браузер успевал
+    оборвать соединение, и пользователь видел «Load failed». Теперь ждать нечего —
+    клиент опрашивает /api/identify/{job_id}.
+    """
+    raw = await photo.read()
+    content_type = photo.content_type or "image/jpeg"
+    _validate_upload(raw, content_type)
+    address_hint = norm_text(address)
+    year_hint = norm_text(year)
+
+    def factory(job_id: str):
+        return run_identification(
+            raw, content_type, address_hint, year_hint,
+            stage=lambda text: jobs.set_stage(job_id, text),
+        )
+
+    return {"job_id": jobs.spawn(factory), "status": "running", "stage": "Начинаем поиск"}
+
+
+@app.get("/api/identify/{job_id}")
+async def identify_status(job_id: str) -> dict[str, Any]:
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Задача не найдена или устарела. Запустите поиск заново.")
+    return job

@@ -35,6 +35,38 @@ def _absolute(value: Any) -> str:
     return "https:" + value if value.startswith("//") else value
 
 
+# Мусор в начале заголовков Яндекс.Карт: «Панорама: Атэк, теплоснабжение, ...»
+TITLE_PREFIX_RE = re.compile(
+    r"^(?:панорама|фото|отзывы\s+об?|больше\s+не\s+работает|видео|карта)\s*[:—-]?\s*",
+    re.I,
+)
+# Категории организаций — это не название объекта, а рубрика справочника.
+CATEGORY_WORDS = {
+    "теплоснабжение", "колледж", "школа", "магазин", "кафе", "ресторан", "аптека", "банк",
+    "отделение", "салон", "офис", "supermarket", "супермаркет", "поликлиника", "больница",
+    "детский сад", "университет", "институт", "техникум", "гостиница", "парикмахерская",
+}
+
+
+def place_name_from_title(title: str) -> str:
+    """Название организации/объекта из заголовка результата поиска.
+
+    «Панорама: Атэк, теплоснабжение, ул. Куникова, 43, Новороссийск» -> «Атэк».
+    Это не догадка модели, а текст, который поисковик привязал к фотографии;
+    проверяться он всё равно будет встречным поиском по изображению.
+    """
+    clean = TITLE_PREFIX_RE.sub("", _norm(title))
+    head = clean.split(",")[0].strip(" .:-—«»\"'")
+    if len(head) < 3 or len(head) > 60:
+        return ""
+    lowered = head.lower()
+    if lowered in CATEGORY_WORDS or re.fullmatch(r"[\d\s.,-]+", head):
+        return ""
+    if any(word in lowered for word in ("википедия", "wikimedia", "commons", "яндекс карты", "file:")):
+        return ""
+    return head
+
+
 def build_query(street: str, house: str) -> str:
     street = _norm(street)
     house = _norm(house)
@@ -85,10 +117,29 @@ def _parse_serp(page_html: str) -> list[dict[str, Any]]:
     return rows
 
 
+async def probe_by_query(query: str, *, timeout: float = 30.0, limit: int = PROBE_IMAGES) -> list[dict[str, Any]]:
+    """Фотографии по произвольному текстовому запросу."""
+    return await _search(query, timeout=timeout, limit=limit)
+
+
+async def probe_by_name(name: str, *, timeout: float = 30.0, limit: int = PROBE_IMAGES) -> list[dict[str, Any]]:
+    """Фотографии по названию объекта: «Атэк», «Новороссийский медицинский колледж»."""
+    name = _norm(name)
+    if len(name) < 3:
+        return []
+    return await _search(f"{name} Новороссийск", timeout=timeout, limit=limit)
+
+
 async def probe_images(street: str, house: str, *, timeout: float = 30.0, limit: int = PROBE_IMAGES) -> list[dict[str, Any]]:
     """Фотографии, которые Яндекс отдаёт по текстовому запросу с адресом."""
     query = build_query(street, house)
     if not query.strip() or query.strip() == "Новороссийск":
+        return []
+    return await _search(query, timeout=timeout, limit=limit)
+
+
+async def _search(query: str, *, timeout: float, limit: int) -> list[dict[str, Any]]:
+    if not _norm(query):
         return []
     try:
         async with httpx.AsyncClient(timeout=timeout, headers=BROWSER_HEADERS, follow_redirects=True) as client:
