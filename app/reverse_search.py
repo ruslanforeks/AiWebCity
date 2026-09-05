@@ -156,8 +156,13 @@ def rank_candidates(items: list[dict[str, Any]], address: str, limit: int = FINA
         score += 45.0 if item.get("match_type") == "exact" else 0.0
         # Порядок внутри выдачи Яндекса — это его собственная оценка похожести.
         score += max(0.0, 26.0 - float(item.get("rank", 0)) * 0.6)
-        # Кроп здания важнее, чем поиск по всему кадру с улицей.
-        if item.get("search_pass", "").startswith("crop"):
+        # Кроп здания важнее, чем поиск по всему кадру с улицей. Кроп по рамке
+        # от Vision — единственный проход, который смотрел именно на постройку,
+        # поэтому весит заметно больше слепой нарезки кадра.
+        search_pass = item.get("search_pass", "")
+        if search_pass == "crop:vision":
+            score += 18.0
+        elif search_pass.startswith("crop"):
             score += 6.0
 
         if any(term in text for term in NOVOROSSIYSK_TERMS):
@@ -259,7 +264,11 @@ async def google_lens_search(image_bytes: bytes) -> dict[str, Any]:
         return {"engine": "Google Lens", "ok": False, "results": [], "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
 
 
-async def search(image_bytes: bytes, address: str = "") -> dict[str, Any]:
+async def search(
+    image_bytes: bytes,
+    address: str = "",
+    building_box_provider: Any = None,
+) -> dict[str, Any]:
     cache_key = hashlib.sha256(image_bytes).hexdigest() + "|" + norm_text(address).lower()
     cached = _CACHE.get(cache_key)
     now = time.time()
@@ -284,14 +293,27 @@ async def search(image_bytes: bytes, address: str = "") -> dict[str, Any]:
     # Второй и третий проход — по объектам, найденным детектором Яндекса.
     # При капче дальше не идём, чтобы не усугублять ситуацию с IP.
     remaining = max(0, MAX_YANDEX_PASSES - 1)
+    vision_box = None
+    if remaining and not captcha and building_box_provider and not pick_object_crops(crops_meta, limit=1):
+        # Детектор Яндекса здания не нашёл. На кадре, который занимает дерево, он
+        # честно отвечает «pinus», и обратный поиск начинает искать сосну. Просим
+        # рамку у Vision — это один вызов и только в таком случае.
+        try:
+            vision_box = await building_box_provider(image_bytes)
+        except Exception:
+            vision_box = None
+
+    crop_payloads: list[tuple[str, bytes]] = []
     if remaining and not captcha:
         try:
             with Image.open(io.BytesIO(image_bytes)) as image:
                 image = image.convert("RGB")
                 selected = pick_object_crops(crops_meta, limit=remaining)
-                crop_payloads: list[tuple[str, bytes]] = [
+                crop_payloads = [
                     (f"crop:{crop['category']}", _crop_bytes(image, crop["box"])) for crop in selected
                 ]
+                if not crop_payloads and vision_box:
+                    crop_payloads = [("crop:vision", _crop_bytes(image, vision_box["box"]))]
                 if not crop_payloads:
                     crop_payloads = [
                         (f"crop:auto{index}", data)
@@ -327,6 +349,7 @@ async def search(image_bytes: bytes, address: str = "") -> dict[str, Any]:
         "yandex_tags": tags,
         "ocr_text": ocr_text,
         "detected_objects": [{"category": c["category"], "area": round(c["area"], 3)} for c in crops_meta],
+        "vision_building_box": vision_box,
         "captcha": captcha,
         "elapsed_seconds": round(time.time() - started, 1),
         "cached": False,

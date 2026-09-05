@@ -8,7 +8,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image
 
-from . import address_resolve, jobs, streets
+from . import address_resolve, jobs, photo_meta, scene, streets
 from .address_probe import place_name_from_title, probe_by_name, probe_images
 from .main import (MAX_UPLOAD_MB, STATIC_DIR, TIMEWEB_TOKEN, extract_year, norm_text,
                    pastvu_search, wikimedia_geosearch, wikimedia_search)
@@ -26,6 +26,9 @@ ADDRESS_PROBE_IMAGES = int(os.getenv("ADDRESS_PROBE_IMAGES", "3"))
 # Проверка по названию объекта — запасной путь, когда адреса нет ни в подписях,
 # ни в подсказках. Названия берутся из подписей подтверждённых фотографий.
 NAME_PROBE_LIMIT = int(os.getenv("NAME_PROBE_LIMIT", "2"))
+# Радиус поиска домов вокруг точки съёмки из EXIF.
+GPS_RADIUS_M = float(os.getenv("GPS_RADIUS_M", "120"))
+GPS_ADDRESS_LIMIT = int(os.getenv("GPS_ADDRESS_LIMIT", "5"))
 # Радиусы архивного поиска. Ближний — фотографии самого здания, дальний — улицы
 # и квартала: по ним видно, как выглядело место, даже если дом не в кадре.
 HISTORY_BUILDING_RADIUS = int(os.getenv("HISTORY_BUILDING_RADIUS", "150"))
@@ -102,8 +105,21 @@ async def run_identification(
     stage: Callable[[str], None] = lambda _: None,
 ) -> dict[str, Any]:
     """Весь пайплайн распознавания. `stage` сообщает, что происходит сейчас."""
+    # Точка съёмки из EXIF — самый прямой сигнал: она говорит, где человек стоял,
+    # а азимут — куда смотрел. Используется в памяти и никуда не сохраняется.
+    gps = photo_meta.extract_gps(raw)
+    gps_addresses: list[dict[str, Any]] = []
+    if gps:
+        stage("Определяем дома рядом с точкой съёмки")
+        gps_addresses = streets.nearby_addresses(
+            gps["lat"], gps["lon"],
+            radius_m=GPS_RADIUS_M, heading=gps.get("heading"), limit=GPS_ADDRESS_LIMIT,
+        )
+
     stage("Ищем похожие фотографии в поиске")
-    reverse_result = await reverse_image_search(raw, address=address_hint)
+    reverse_result = await reverse_image_search(
+        raw, address=address_hint, building_box_provider=scene.detect_main_building,
+    )
     candidates = reverse_result.get("results", [])
     yandex_tags = reverse_result.get("yandex_tags", [])
     ocr_text = reverse_result.get("ocr_text", "")
@@ -157,6 +173,7 @@ async def run_identification(
         yandex_tags=yandex_tags,
         ocr_text=ocr_text,
         user_address=address_hint,
+        gps_addresses=gps_addresses,
     )
     location = resolved.get("location")
     probe_report: list[dict[str, Any]] = []
@@ -167,8 +184,12 @@ async def run_identification(
     # пользователя. Совпало — адрес доказан изображением, а не чужим текстом.
     if accepted and not resolved.get("confirmed"):
         targets: list[tuple[str, str, str]] = []
+        # Дома у точки съёмки проверяем первыми: они ближе всего к истине.
+        for entry in gps_addresses[:2]:
+            targets.append((norm_text(entry["street"]), norm_text(entry["house"]), "photo_gps"))
         for street, house in address_resolve.parse_user_hint(address_hint)[:1]:
-            targets.append((street, house, "user_hint"))
+            if (street, house) not in {(t[0], t[1]) for t in targets}:
+                targets.append((street, house, "user_hint"))
         for hypothesis in (resolved.get("hypotheses") or []):
             pair = (hypothesis["street"], hypothesis["house"])
             if pair not in {(t[0], t[1]) for t in targets}:
@@ -194,6 +215,49 @@ async def run_identification(
                 if probed:
                     probed["sources"] = ["address_probe", origin]
                     probed["evidence"] = [item.get("reason") for item in matched[:2] if item.get("reason")]
+                    location = probed
+                    resolved["location"] = probed
+                    resolved["address"] = address_resolve.pretty_address(probed)
+                    resolved["confirmed"] = True
+                    accepted.extend(matched)
+                    break
+
+    # Ни подписи, ни подсказки, ни координаты не дали адреса — читаем то, что
+    # написано на самой фотографии. Собственный OCR Яндекса на таких кадрах
+    # выдаёт мусор вроде «1-1-I l omaRossin».
+    photo_text: dict[str, Any] = {}
+    if accepted and not resolved.get("confirmed"):
+        stage("Читаем таблички и вывески на фотографии")
+        photo_text = await scene.read_photo_text(raw)
+        read_line = norm_text(f"{photo_text.get('street_name')} {photo_text.get('house_number')}")
+        extra_targets: list[tuple[str, str, str]] = []
+        for street, house in address_resolve.extract_street_house(read_line):
+            extra_targets.append((street, house, "photo_text"))
+        if not extra_targets and photo_text.get("house_number"):
+            # Номер дома виден, улицы нет — примеряем его к улицам из уже
+            # набранных гипотез и к подсказке пользователя.
+            house = norm_text(photo_text["house_number"])
+            known_streets = [h["street"] for h in (resolved.get("hypotheses") or [])[:2]]
+            known_streets += [s for s, _ in address_resolve.parse_user_hint(address_hint)]
+            for street in dict.fromkeys(known_streets):
+                extra_targets.append((street, house, "photo_text"))
+
+        for street, house, origin in extra_targets[:2]:
+            stage(f"Проверяем адрес с таблички: {street} {house}".strip())
+            reference = await probe_images(street, house, limit=ADDRESS_PROBE_IMAGES + 1)
+            if not reference:
+                continue
+            checks = await verify_candidates(raw, content_type, reference, limit=ADDRESS_PROBE_IMAGES)
+            matched = [
+                item for item in checks
+                if item.get("same_place") and float(item.get("confidence", 0.0)) >= VISUAL_CONFIDENCE_THRESHOLD
+            ]
+            probe_report.append({"address": f"{street} {house}".strip(), "origin": origin,
+                                 "images": len(reference), "matched": len(matched)})
+            if matched:
+                probed = await address_resolve.geocode_single(street, house)
+                if probed:
+                    probed["sources"] = ["address_probe", origin]
                     location = probed
                     resolved["location"] = probed
                     resolved["address"] = address_resolve.pretty_address(probed)
@@ -394,6 +458,10 @@ async def run_identification(
             "visual_errors": vision_errors[:5],
             "address_hypotheses": resolved.get("hypotheses"),
             "address_probe": probe_report,
+            "gps": gps,
+            "gps_addresses": gps_addresses,
+            "photo_text": photo_text or None,
+            "vision_building_box": reverse_result.get("vision_building_box"),
             "address_confirmed": address_confirmed,
             "address_guess": resolved.get("address") if not address_confirmed else None,
             "search_seconds": reverse_result.get("elapsed_seconds"),

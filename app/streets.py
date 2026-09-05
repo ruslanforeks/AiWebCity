@@ -43,8 +43,18 @@ def load() -> dict[str, Any]:
         except (OSError, ValueError):
             raw = {"streets": {}, "street_coords": {}}
         streets = raw.get("streets") or {}
+        houses = raw.get("houses") or {}
+        # Плоский список домов с координатами: по нему ищутся адреса рядом с
+        # точкой съёмки. 25 тысяч записей просматриваются за доли миллисекунды.
+        points: list[tuple[float, float, str, str]] = []
+        for street, entries in houses.items():
+            for house, point in entries.items():
+                if isinstance(point, list) and len(point) == 2:
+                    points.append((float(point[0]), float(point[1]), street, house))
         _DB = {
             "streets": streets,
+            "houses": houses,
+            "points": points,
             "coords": raw.get("street_coords") or {},
             # индекс «куникова» -> «улица Куникова»
             "by_bare": {_bare(name): name for name in streets},
@@ -125,3 +135,45 @@ def suggest(query: str, limit: int = 8) -> list[dict[str, str]]:
     for _, name in matches[:limit]:
         results.append({"value": name, "street": name, "house": "", "houses": str(len(streets[name]))})
     return results
+
+
+def nearby_addresses(
+    lat: float,
+    lon: float,
+    *,
+    radius_m: float = 120.0,
+    heading: float | None = None,
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    """Дома рядом с точкой съёмки, ближние первыми.
+
+    Если известен азимут камеры, дома «за спиной» уходят вниз списка: человек
+    фотографировал то, на что смотрел, а не то, что было позади. Полностью
+    отбрасывать их нельзя — азимут в EXIF бывает неточным.
+    """
+    from .photo_meta import angle_diff, bearing_deg, distance_m
+
+    rows: list[tuple[float, dict[str, Any]]] = []
+    for plat, plon, street, house in load()["points"]:
+        # Дешёвая отбраковка по прямоугольнику до честного расстояния.
+        if abs(plat - lat) > 0.0025 or abs(plon - lon) > 0.0035:
+            continue
+        distance = distance_m(lat, lon, plat, plon)
+        if distance > radius_m:
+            continue
+        penalty = 0.0
+        off_axis = None
+        if heading is not None:
+            off_axis = angle_diff(heading, bearing_deg(lat, lon, plat, plon))
+            penalty = distance * (off_axis / 90.0)
+        rows.append((distance + penalty, {
+            "street": street,
+            "house": house,
+            "lat": plat,
+            "lon": plon,
+            "distance_m": round(distance, 1),
+            "off_axis_deg": round(off_axis, 1) if off_axis is not None else None,
+        }))
+
+    rows.sort(key=lambda row: row[0])
+    return [row[1] for row in rows[:limit]]

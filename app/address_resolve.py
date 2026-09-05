@@ -129,7 +129,11 @@ def house_key(house: str) -> str:
     return digits.group(0) if digits else _clean(house)
 
 
-def image_derived_addresses(yandex_tags: list[str], ocr_text: str) -> tuple[set[str], set[tuple[str, str]]]:
+def image_derived_addresses(
+    yandex_tags: list[str],
+    ocr_text: str,
+    gps_addresses: list[dict[str, Any]] | None = None,
+) -> tuple[set[str], set[tuple[str, str]]]:
     """Адресные признаки, полученные ИЗ САМОЙ ФОТОГРАФИИ.
 
     Подсказки Яндекса и OCR построены по изображению, а подписи кандидатов — по
@@ -141,6 +145,14 @@ def image_derived_addresses(yandex_tags: list[str], ocr_text: str) -> tuple[set[
         for street, house in extract_street_house(text):
             streets.add(street)
             houses.add((street, house_key(house)))
+    # Координаты съёмки — тоже свойство самой фотографии, а не чужой подписи.
+    for entry in gps_addresses or []:
+        street = _clean(re.sub(rf"^{STREET_PREFIX}{_SEP}", "", _clean(entry.get("street", ""))))
+        house = norm_text(entry.get("house"))
+        if street:
+            streets.add(street)
+            if house:
+                houses.add((street, house_key(house)))
     return streets, houses
 
 
@@ -150,6 +162,7 @@ def collect_evidence(
     yandex_tags: list[str],
     ocr_text: str,
     user_address: str,
+    gps_addresses: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Складывает адресные гипотезы с весами, источниками и подтверждениями."""
     groups: dict[tuple[str, str], dict[str, Any]] = {}
@@ -189,7 +202,15 @@ def collect_evidence(
     for street, house in parse_user_hint(user_address):
         add(street, house, "user_hint", 8.0, user_address)
 
-    photo_streets, photo_houses = image_derived_addresses(yandex_tags, ocr_text)
+    # Ближайшие к точке съёмки дома — сильная гипотеза: человек стоял рядом.
+    for position, entry in enumerate((gps_addresses or [])[:4]):
+        street = _clean(re.sub(rf"^{STREET_PREFIX}{_SEP}", "", _clean(entry.get("street", ""))))
+        house = norm_text(entry.get("house"))
+        if street and house:
+            add(street, house, "photo_gps", max(20.0, 70.0 - position * 12.0),
+                f"снято в {entry.get('distance_m')} м от дома")
+
+    photo_streets, photo_houses = image_derived_addresses(yandex_tags, ocr_text, gps_addresses)
     hint_streets = {street for street, _ in parse_user_hint(user_address)}
 
     rows = list(groups.values())
@@ -401,12 +422,14 @@ async def resolve(
     yandex_tags: list[str],
     ocr_text: str,
     user_address: str,
+    gps_addresses: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     rows = collect_evidence(
         verified_candidates=verified_candidates,
         yandex_tags=yandex_tags,
         ocr_text=ocr_text,
         user_address=user_address,
+        gps_addresses=gps_addresses,
     )
     place_names = extract_place_names(yandex_tags)
     location = await geocode_candidates(rows, place_names)
