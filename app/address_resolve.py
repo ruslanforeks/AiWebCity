@@ -133,26 +133,35 @@ def image_derived_addresses(
     yandex_tags: list[str],
     ocr_text: str,
     gps_addresses: list[dict[str, Any]] | None = None,
-) -> tuple[set[str], set[tuple[str, str]]]:
-    """Адресные признаки, полученные ИЗ САМОЙ ФОТОГРАФИИ.
+) -> tuple[dict[str, set[str]], dict[tuple[str, str], set[str]]]:
+    """Адресные признаки, полученные ИЗ САМОЙ ФОТОГРАФИИ, с указанием источника.
 
-    Подсказки Яндекса и OCR построены по изображению, а подписи кандидатов — по
-    страницам, которые мы не проверяли. Поэтому они и служат подтверждением.
+    Подсказки Яндекса, OCR и координаты съёмки построены по изображению, а
+    подписи кандидатов — по страницам, которые мы не проверяли. Поэтому первые и
+    служат подтверждением.
+
+    Источник запоминается не для отчётности: гипотеза не должна подтверждать сама
+    себя. Тег «свободы 54» и создавал гипотезу, и давал ей бонус за совпадение с
+    признаком из фотографии — и обходил верный адрес, за которым стояло реальное
+    визуальное совпадение.
     """
-    streets: set[str] = set()
-    houses: set[tuple[str, str]] = set()
-    for text in list(yandex_tags) + [ocr_text]:
-        for street, house in extract_street_house(text):
-            streets.add(street)
-            houses.add((street, house_key(house)))
-    # Координаты съёмки — тоже свойство самой фотографии, а не чужой подписи.
+    streets: dict[str, set[str]] = {}
+    houses: dict[tuple[str, str], set[str]] = {}
+
+    def remember(street: str, house: str, source: str) -> None:
+        streets.setdefault(street, set()).add(source)
+        if house:
+            houses.setdefault((street, house_key(house)), set()).add(source)
+
+    for tag in yandex_tags:
+        for street, house in extract_street_house(tag):
+            remember(street, house, "yandex_tag")
+    for street, house in extract_street_house(ocr_text):
+        remember(street, house, "photo_ocr")
     for entry in gps_addresses or []:
         street = _clean(re.sub(rf"^{STREET_PREFIX}{_SEP}", "", _clean(entry.get("street", ""))))
-        house = norm_text(entry.get("house"))
         if street:
-            streets.add(street)
-            if house:
-                houses.add((street, house_key(house)))
+            remember(street, norm_text(entry.get("house")), "photo_gps")
     return streets, houses
 
 
@@ -217,25 +226,29 @@ def collect_evidence(
     for row in rows:
         key = (row["street"], house_key(row["house"]))
         independent_candidates = len(row["candidate_ids"])
+        own_sources = set(row["sources"])
 
-        # Совпадение с признаком, извлечённым из самой фотографии.
-        if key in photo_houses:
+        # Бонус за совпадение с признаком из фотографии даётся только тогда, когда
+        # этот признак пришёл НЕ от того же источника, что породил гипотезу.
+        # Иначе подсказка Яндекса подтверждает сама себя и обходит адрес, за
+        # которым стоит настоящее визуальное совпадение.
+        house_backers = photo_houses.get(key, set()) - own_sources
+        street_backers = photo_streets.get(row["street"], set()) - own_sources
+        if house_backers:
             row["score"] += 60.0
-        elif row["street"] in photo_streets:
+        elif street_backers:
             row["score"] += 30.0
 
         row["score"] += 25.0 * max(0, len(row["sources"]) - 1)
         row["score"] += 18.0 * max(0, min(independent_candidates, 3) - 1)
 
-        # Улица должна подтверждаться независимым источником: подсказкой Яндекса,
-        # OCR с фотографии или адресом пользователя. Иначе адрес остаётся догадкой,
-        # даже если все подписи кандидатов дружно называют одно и то же место —
-        # так система выдавала здание другого корпуса того же колледжа в 2 км.
-        # Подсказка пользователя подтверждает улицу только тогда, когда её назвал
-        # ещё кто-то: иначе любой введённый адрес подтверждал бы сам себя.
-        hint_supported = row["street"] in hint_streets and any(src != "user_hint" for src in row["sources"])
-        row["street_corroborated"] = row["street"] in photo_streets or hint_supported
-        row["house_corroborated"] = key in photo_houses
+        # Улица должна подтверждаться источником, отличным от тех, что породили
+        # саму гипотезу. Иначе адрес остаётся догадкой, даже если все подписи
+        # кандидатов дружно называют одно и то же место — так система выдавала
+        # здание другого корпуса того же колледжа в двух километрах.
+        hint_supported = row["street"] in hint_streets and bool(own_sources - {"user_hint"})
+        row["street_corroborated"] = bool(street_backers) or bool(house_backers) or hint_supported
+        row["house_corroborated"] = bool(house_backers)
         row["independent_candidates"] = independent_candidates
         row.pop("candidate_ids", None)
 

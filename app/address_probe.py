@@ -150,13 +150,17 @@ async def _search(query: str, *, timeout: float, limit: int) -> list[dict[str, A
     except (httpx.HTTPError, ValueError):
         return []
 
-    # Панорамы и карточки организаций — самые полезные: на них здание целиком
-    # и снято с улицы, а не интерьер и не документ.
-    def priority(row: dict[str, Any]) -> tuple[int, int]:
-        text = f"{row.get('title')} {row.get('site')}".lower()
-        good = any(word in text for word in ("панорама", "яндекс карты", "фото", "здание", "улица", "2gis", "дом"))
+    # Панорама, привязанная к точке на карте, — единственный тип результата,
+    # который отвечает именно за АДРЕС. Карточка организации отвечает за
+    # организацию, а у неё бывает несколько корпусов по разным адресам: так проба
+    # «Рубина, 5» подтверждалась фотографиями колледжа, стоящего на Советов, 38.
+    def priority(row: dict[str, Any]) -> tuple[int, int, int]:
+        text = f"{row.get('title')} {row.get('site')} {row.get('page_url')}".lower()
+        image = str(row.get("image_url") or "").lower()
+        geo_anchored = "static-pano.maps.yandex" in image or "на карте" in text
+        useful = any(word in text for word in ("панорама", "яндекс карты", "фото", "здание", "улица", "2gis", "дом"))
         bad = any(word in text for word in ("интерьер", "квартир", "планировк", "схема", "карта проезда"))
-        return (0 if bad else (1 if not good else 2), -int(row.get("rank", 0)))
+        return (1 if geo_anchored else 0, 0 if bad else (1 if not useful else 2), -int(row.get("rank", 0)))
 
     rows.sort(key=priority, reverse=True)
     return rows[:limit]

@@ -8,7 +8,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image
 
-from . import address_resolve, jobs, photo_meta, scene, streets
+from . import address_resolve, history_match, jobs, photo_meta, place_cache, scene, streets
 from .address_probe import place_name_from_title, probe_by_name, probe_images
 from .main import (MAX_UPLOAD_MB, STATIC_DIR, TIMEWEB_TOKEN, extract_year, norm_text,
                    pastvu_search, wikimedia_geosearch, wikimedia_search)
@@ -26,6 +26,9 @@ ADDRESS_PROBE_IMAGES = int(os.getenv("ADDRESS_PROBE_IMAGES", "3"))
 # Проверка по названию объекта — запасной путь, когда адреса нет ни в подписях,
 # ни в подсказках. Названия берутся из подписей подтверждённых фотографий.
 NAME_PROBE_LIMIT = int(os.getenv("NAME_PROBE_LIMIT", "2"))
+# Насколько слабее лидера может быть гипотеза, чтобы её совпадение при встречном
+# поиске всё-таки считалось подтверждением адреса.
+PROBE_MIN_SCORE_RATIO = float(os.getenv("PROBE_MIN_SCORE_RATIO", "0.6"))
 # Радиус поиска домов вокруг точки съёмки из EXIF.
 GPS_RADIUS_M = float(os.getenv("GPS_RADIUS_M", "120"))
 GPS_ADDRESS_LIMIT = int(os.getenv("GPS_ADDRESS_LIMIT", "5"))
@@ -46,7 +49,8 @@ def _dedupe_images(items: list[dict[str, Any]], limit: int = 24) -> list[dict[st
         seen.add(url)
         result.append({
             key: item.get(key)
-            for key in ("image_url", "page_url", "year", "source", "kind", "distance_m", "scope", "title")
+            for key in ("image_url", "page_url", "year", "source", "kind", "distance_m", "scope", "title",
+                        "building_present", "visibility", "angle", "match_confidence", "matching_features")
             if item.get(key) is not None
         })
         if len(result) >= limit:
@@ -183,6 +187,10 @@ async def run_identification(
     # Тогда идём с другой стороны: ищем фотографии ПО АДРЕСУ и сравниваем их с фото
     # пользователя. Совпало — адрес доказан изображением, а не чужим текстом.
     if accepted and not resolved.get("confirmed"):
+        hypotheses = resolved.get("hypotheses") or []
+        top_score = max((float(h.get("score", 0.0)) for h in hypotheses), default=0.0)
+        scores = {(h["street"], h["house"]): float(h.get("score", 0.0)) for h in hypotheses}
+
         targets: list[tuple[str, str, str]] = []
         # Дома у точки съёмки проверяем первыми: они ближе всего к истине.
         for entry in gps_addresses[:2]:
@@ -190,7 +198,7 @@ async def run_identification(
         for street, house in address_resolve.parse_user_hint(address_hint)[:1]:
             if (street, house) not in {(t[0], t[1]) for t in targets}:
                 targets.append((street, house, "user_hint"))
-        for hypothesis in (resolved.get("hypotheses") or []):
+        for hypothesis in hypotheses:
             pair = (hypothesis["street"], hypothesis["house"])
             if pair not in {(t[0], t[1]) for t in targets}:
                 targets.append((pair[0], pair[1], "hypothesis"))
@@ -211,6 +219,21 @@ async def run_identification(
                 "images": len(reference), "matched": len(matched),
             })
             if matched:
+                # Совпадение по слабой гипотезе не должно перебивать лидера. На
+                # фотографии колледжа на Советов, 38 проба по «Советов 38»
+                # (оценка 128) не совпала, а по «Рубина 5» (оценка 46) совпала —
+                # и сервис уверенно выдавал адрес в двух километрах. Координаты
+                # съёмки и адрес от пользователя — независимые свидетельства,
+                # им такое ограничение не нужно.
+                own_score = scores.get((street, house), 0.0)
+                weak = (
+                    origin == "hypothesis"
+                    and top_score > 0
+                    and own_score < top_score * PROBE_MIN_SCORE_RATIO
+                )
+                probe_report[-1]["rejected_as_weak"] = weak
+                if weak:
+                    continue
                 probed = await address_resolve.geocode_single(street, house)
                 if probed:
                     probed["sources"] = ["address_probe", origin]
@@ -255,6 +278,21 @@ async def run_identification(
             probe_report.append({"address": f"{street} {house}".strip(), "origin": origin,
                                  "images": len(reference), "matched": len(matched)})
             if matched:
+                # Совпадение по слабой гипотезе не должно перебивать лидера. На
+                # фотографии колледжа на Советов, 38 проба по «Советов 38»
+                # (оценка 128) не совпала, а по «Рубина 5» (оценка 46) совпала —
+                # и сервис уверенно выдавал адрес в двух километрах. Координаты
+                # съёмки и адрес от пользователя — независимые свидетельства,
+                # им такое ограничение не нужно.
+                own_score = scores.get((street, house), 0.0)
+                weak = (
+                    origin == "hypothesis"
+                    and top_score > 0
+                    and own_score < top_score * PROBE_MIN_SCORE_RATIO
+                )
+                probe_report[-1]["rejected_as_weak"] = weak
+                if weak:
+                    continue
                 probed = await address_resolve.geocode_single(street, house)
                 if probed:
                     probed["sources"] = ["address_probe", origin]
@@ -362,6 +400,7 @@ async def run_identification(
     # Исторические фотографии ищем только вокруг ПОДТВЕРЖДЁННОГО адреса: по
     # неподтверждённой догадке они могут оказаться снимками совсем другого места.
     historical: list[dict[str, Any]] = []
+    history_from_cache = False
     if address_confirmed and location and location.get("lat") is not None:
         stage("Ищем архивные фотографии")
         lat, lon = float(location["lat"]), float(location["lon"])
@@ -396,6 +435,22 @@ async def run_identification(
             for item in text_photos:
                 item["scope"] = "street"
             historical.extend(text_photos)
+
+        historical = _dedupe_images(historical, HISTORY_LIMIT)
+
+        # Кэш уровня 1: адрес, архивные снимки и вердикты их привязки к зданию не
+        # зависят от того, с какой стороны снимал человек, поэтому переиспользуются
+        # всеми. Сама реконструкция сюда не попадает — она рисуется под конкретный
+        # кадр, и отдать её другому значило бы показать ему чужой ракурс.
+        cache_key = f"{resolved.get('address')}|{extract_year(year) or ''}"
+        cached = place_cache.load(cache_key)
+        if cached and cached.get("historical"):
+            historical = cached["historical"]
+            history_from_cache = True
+        else:
+            stage("Проверяем, видно ли здание на архивных фотографиях")
+            historical = await history_match.match_archive_photos(raw, historical)
+            place_cache.save(cache_key, {"historical": historical})
 
     if accepted and address_confirmed:
         location_sources = (location or {}).get("sources") or []
@@ -440,7 +495,13 @@ async def run_identification(
             if item.get("image_url") or item.get("thumb_url")
         ],
         "matched_images": matched_images,
-        "historical_images": _dedupe_images(historical, HISTORY_LIMIT),
+        "historical_images": historical,
+        "historical_summary": {
+            "total": len(historical),
+            "with_building": sum(1 for x in historical if x.get("building_present")),
+            "from_cache": history_from_cache,
+            "reference": history_match.best_reference(historical),
+        },
         "message": message,
         "privacy": {
             "server_storage": False,
@@ -466,6 +527,8 @@ async def run_identification(
             "address_guess": resolved.get("address") if not address_confirmed else None,
             "search_seconds": reverse_result.get("elapsed_seconds"),
             "cached_search": reverse_result.get("cached"),
+            "history_from_cache": history_from_cache,
+            "place_cache": place_cache.stats(),
         },
     }
 

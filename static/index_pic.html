@@ -102,8 +102,8 @@ function cards(items,opts={}){
     if(!x.image_url) return '';
     const badge=opts.showConfidence&&x.confidence!=null?'<span class="badge">'+pct(x.confidence)+'%</span>':'';
     const year=x.year?'<span class="year">'+esc(x.year)+'</span>':'';
-    const scope=opts.showScope&&x.scope?'<span class="scope'+(x.scope==='street'?' street':'')+'">'+
-      (x.scope==='building'?'рядом с домом':'этот квартал')+'</span>':'';
+    const scope=opts.showScope&&x.scope?'<span class="scope'+(x.building_present?'':' street')+'">'+
+      (x.building_present?'здание в кадре':'этот квартал')+'</span>':'';
     return '<article class="item">'+badge+year+scope+
       '<img loading="lazy" src="'+esc(x.image_url)+'" alt="" onerror="this.closest(\'.item\').remove()">'+
     '</article>';
@@ -170,7 +170,7 @@ form.onsubmit=async e=>{
     const matched=d.matched_images||[],candidates=d.candidate_images||[],historical=d.historical_images||[];
     const confirmed=matched.length>0;
     const best=confirmed?matched[0]:null;
-    const building=historical.filter(x=>x.scope==='building').length;
+    const building=historical.filter(x=>x.building_present).length;
     let html='<h2>Результаты</h2>'+header(d)+askForAddress(d);
     html+='<div class="section-title"><h3>'+(confirmed?'Подтверждённые совпадения':'Кандидаты для проверки')+'</h3>'+
           '<span class="count">'+(confirmed?matched.length:candidates.length)+' фото</span></div>'+
@@ -178,7 +178,7 @@ form.onsubmit=async e=>{
     if(best?.matching_features?.length)
       html+='<ul class="features">'+best.matching_features.map(f=>'<li>'+esc(f)+'</li>').join('')+'</ul>';
     html+='<div class="section-title"><h3>Исторические фотографии</h3><span class="count">'+historical.length+' фото'+
-          (building?' · '+building+' рядом с домом':'')+'</span></div>'+cards(historical,{showScope:true});
+          (building?' · '+building+' со зданием в кадре':'')+'</span></div>'+cards(historical,{showScope:true});
     html+='<div class="notice" style="margin-top:20px">'+esc(d.message||'')+'</div>';
     result.innerHTML=html;result.style.display='block';statusEl.textContent='Поиск завершён';
     window.scrollTo({top:result.offsetTop-12,behavior:'smooth'});
